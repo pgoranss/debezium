@@ -12,8 +12,6 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Preconditions;
-
 import io.debezium.config.ConfigurationDefaults;
 
 /**
@@ -34,7 +32,6 @@ public class TimedBlockingReader extends BlockingReader {
      */
     public TimedBlockingReader(String name, Duration timeoutMinutes) {
         super(name, "The connector will wait for " + timeoutMinutes.toMinutes() + " minutes before proceeding");
-        Preconditions.checkNotNull(timeoutMinutes);
 
         // number of ticks calculated based upon the BlockingReader's metronome period
         ticks = timeoutMinutes.toMillis() / ConfigurationDefaults.RETURN_CONTROL_INTERVAL.toMillis();
