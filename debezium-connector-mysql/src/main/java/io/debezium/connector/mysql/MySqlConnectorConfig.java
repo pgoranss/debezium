@@ -866,6 +866,15 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                     "The value of those properties is the select statement to use when retrieving data from the specific table during snapshotting. " +
                     "A possible use case for large append-only tables is setting a specific point where to start (resume) snapshotting, in case a previous snapshotting was interrupted.");
 
+    public static final Field SNAPSHOT_DELAY_MINUTES = Field.createInternal("snapshot.delay.minutes")
+            .withDisplayName("Snapshot Delay (minutes)")
+            .withType(Type.LONG)
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.LOW)
+            .withDescription("The number of minutes to delay before a snapshot will begin.")
+            .withDefault(0)
+            .withValidation(Field::isNonNegativeLong);
+
     /**
      * Method that generates a Field for specifying that string columns whose names match a set of regular expressions should
      * have their values truncated to be no longer than the specified number of characters.
