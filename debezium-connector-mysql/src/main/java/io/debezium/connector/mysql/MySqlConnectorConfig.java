@@ -872,7 +872,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
             .withWidth(Width.MEDIUM)
             .withImportance(Importance.LOW)
             .withDescription("The number of minutes to delay before a snapshot will begin.")
-            .withDefault(0)
+            .withDefault(0l)
             .withValidation(Field::isNonNegativeLong);
 
     /**
@@ -928,6 +928,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                      BIGINT_UNSIGNED_HANDLING_MODE,
                                                      EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE,
                                                      INCONSISTENT_SCHEMA_HANDLING_MODE,
+                                                     SNAPSHOT_DELAY_MINUTES,
                                                      CommonConnectorConfig.TOMBSTONES_ON_DELETE);
 
     /**
@@ -984,7 +985,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
         Field.group(config, "Connector", CONNECTION_TIMEOUT_MS, KEEP_ALIVE, CommonConnectorConfig.MAX_QUEUE_SIZE,
                     CommonConnectorConfig.MAX_BATCH_SIZE, CommonConnectorConfig.POLL_INTERVAL_MS,
                     SNAPSHOT_MODE, SNAPSHOT_LOCKING_MODE, SNAPSHOT_MINIMAL_LOCKING, TIME_PRECISION_MODE, DECIMAL_HANDLING_MODE,
-                    BIGINT_UNSIGNED_HANDLING_MODE);
+                    BIGINT_UNSIGNED_HANDLING_MODE, SNAPSHOT_DELAY_MINUTES);
         return config;
     }
 
