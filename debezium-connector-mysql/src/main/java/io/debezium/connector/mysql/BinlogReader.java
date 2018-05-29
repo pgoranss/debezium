@@ -165,6 +165,7 @@ public class BinlogReader extends AbstractReader {
         client.setServerId(context.serverId());
         client.setSSLMode(sslModeFor(connectionContext.sslMode()));
         client.setKeepAlive(context.config().getBoolean(MySqlConnectorConfig.KEEP_ALIVE));
+        client.setKeepAliveInterval(context.config().getLong(MySqlConnectorConfig.KEEP_ALIVE_INTERVAL_MS));
         client.registerEventListener(context.bufferSizeForBinlogReader() == 0
                 ? this::handleEvent
                 : (new EventBuffer(context.bufferSizeForBinlogReader(), this))::add);
@@ -230,7 +231,7 @@ public class BinlogReader extends AbstractReader {
         client.setEventDeserializer(eventDeserializer);
 
         // Set up for JMX ...
-        metrics = new BinlogReaderMetrics(client);
+        metrics = new BinlogReaderMetrics(client, context.dbSchema());
         heartbeat = Heartbeat.create(context.config(), context.topicSelector().getHeartbeatTopic(),
                 context.serverName(), () -> OffsetPosition.build(source.partition(), source.offset()));
     }

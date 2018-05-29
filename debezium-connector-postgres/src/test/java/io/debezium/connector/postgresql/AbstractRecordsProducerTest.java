@@ -76,8 +76,8 @@ public abstract class AbstractRecordsProducerTest {
     protected static final Pattern INSERT_TABLE_MATCHING_PATTERN = Pattern.compile("insert into (.*)\\(.*\\) VALUES .*", Pattern.CASE_INSENSITIVE);
 
     protected static final String INSERT_CASH_TYPES_STMT = "INSERT INTO cash_table (csh) VALUES ('$1234.11')";
-    protected static final String INSERT_DATE_TIME_TYPES_STMT = "INSERT INTO time_table(ts, tz, date, ti, ttz, it) " +
-                                                                "VALUES ('2016-11-04T13:51:30'::TIMESTAMP, '2016-11-04T13:51:30+02:00'::TIMESTAMPTZ, " +
+    protected static final String INSERT_DATE_TIME_TYPES_STMT = "INSERT INTO time_table(ts, tsneg, tz, date, ti, ttz, it) " +
+                                                                "VALUES ('2016-11-04T13:51:30.123456'::TIMESTAMP, '1936-10-25T22:10:12.608'::TIMESTAMP, '2016-11-04T13:51:30+02:00'::TIMESTAMPTZ, " +
                                                                 "'2016-11-04'::DATE, '13:51:30'::TIME, '13:51:30+02:00'::TIMETZ, 'P1Y2M3DT4H5M0S'::INTERVAL)";
     protected static final String INSERT_BIN_TYPES_STMT = "INSERT INTO bitbin_table (ba, bol, bs, bv) " +
                                                           "VALUES (E'\\\\001\\\\002\\\\003'::bytea, '0'::bit(1), '11'::bit(2), '00'::bit(2))";
@@ -86,7 +86,7 @@ public abstract class AbstractRecordsProducerTest {
                                                            "VALUES ('{\"bar\": \"baz\"}'::json, '{\"bar\": \"baz\"}'::jsonb, " +
                                                            "'<foo>bar</foo><foo>bar</foo>'::xml, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::UUID)";
     protected static final String INSERT_STRING_TYPES_STMT = "INSERT INTO string_table (vc, vcv, ch, c, t, b, bnn) " +
-                                                             "VALUES ('aa', 'bb', 'cdef', 'abc', 'some text', E'\\\\000\\\\001\\\\002'::bytea, E'\\\\003\\\\004\\\\005'::bytea)";
+                                                             "VALUES ('\u017E\u0161', 'bb', 'cdef', 'abc', 'some text', E'\\\\000\\\\001\\\\002'::bytea, E'\\\\003\\\\004\\\\005'::bytea)";
     protected static final String INSERT_NUMERIC_TYPES_STMT =
             "INSERT INTO numeric_table (si, i, bi, r, db, r_int, db_int, r_nan, db_nan, r_pinf, db_pinf, r_ninf, db_ninf, ss, bs, b) " +
              "VALUES (1, 123456, 1234567890123, 3.3, 4.44, 3, 4, 'NaN', 'NaN', 'Infinity', 'Infinity', '-Infinity', '-Infinity', 1, 123, true)";
@@ -245,7 +245,7 @@ public abstract class AbstractRecordsProducerTest {
     }
 
     protected List<SchemaAndValueField> schemasAndValuesForStringTypes() {
-       return Arrays.asList(new SchemaAndValueField("vc", Schema.OPTIONAL_STRING_SCHEMA, "aa"),
+       return Arrays.asList(new SchemaAndValueField("vc", Schema.OPTIONAL_STRING_SCHEMA, "\u017E\u0161"),
                             new SchemaAndValueField("vcv", Schema.OPTIONAL_STRING_SCHEMA, "bb"),
                             new SchemaAndValueField("ch", Schema.OPTIONAL_STRING_SCHEMA, "cdef"),
                             new SchemaAndValueField("c", Schema.OPTIONAL_STRING_SCHEMA, "abc"),
@@ -294,7 +294,8 @@ public abstract class AbstractRecordsProducerTest {
     }
 
     protected List<SchemaAndValueField> schemaAndValuesForDateTimeTypes() {
-        long expectedTs = NanoTimestamp.toEpochNanos(LocalDateTime.parse("2016-11-04T13:51:30"), null);
+        long expectedTs = NanoTimestamp.toEpochNanos(LocalDateTime.parse("2016-11-04T13:51:30.123456"), null);
+        long expectedNegTs = NanoTimestamp.toEpochNanos(LocalDateTime.parse("1936-10-25T22:10:12.608"), null);
         String expectedTz = "2016-11-04T11:51:30Z"; //timestamp is stored with TZ, should be read back with UTC
         int expectedDate = Date.toEpochDay(LocalDate.parse("2016-11-04"), null);
         long expectedTi = LocalTime.parse("13:51:30").toNanoOfDay();
@@ -302,6 +303,7 @@ public abstract class AbstractRecordsProducerTest {
         double interval = MicroDuration.durationMicros(1, 2, 3, 4, 5, 0, PostgresValueConverter.DAYS_PER_MONTH_AVG);
 
         return Arrays.asList(new SchemaAndValueField("ts", NanoTimestamp.builder().optional().build(), expectedTs),
+                             new SchemaAndValueField("tsneg", NanoTimestamp.builder().optional().build(), expectedNegTs),
                              new SchemaAndValueField("tz", ZonedTimestamp.builder().optional().build(), expectedTz),
                              new SchemaAndValueField("date", Date.builder().optional().build(), expectedDate),
                              new SchemaAndValueField("ti", NanoTime.builder().optional().build(), expectedTi),
@@ -310,7 +312,8 @@ public abstract class AbstractRecordsProducerTest {
     }
 
     protected List<SchemaAndValueField> schemaAndValuesForDateTimeTypesAdaptiveTimeMicroseconds() {
-        long expectedTs = NanoTimestamp.toEpochNanos(LocalDateTime.parse("2016-11-04T13:51:30"), null);
+        long expectedTs = NanoTimestamp.toEpochNanos(LocalDateTime.parse("2016-11-04T13:51:30.123456"), null);
+        long expectedNegTs = NanoTimestamp.toEpochNanos(LocalDateTime.parse("1936-10-25T22:10:12.608"), null);
         String expectedTz = "2016-11-04T11:51:30Z"; //timestamp is stored with TZ, should be read back with UTC
         int expectedDate = Date.toEpochDay(LocalDate.parse("2016-11-04"), null);
         long expectedTi = LocalTime.parse("13:51:30").toNanoOfDay() / 1_000;
@@ -318,6 +321,7 @@ public abstract class AbstractRecordsProducerTest {
         double interval = MicroDuration.durationMicros(1, 2, 3, 4, 5, 0, PostgresValueConverter.DAYS_PER_MONTH_AVG);
 
         return Arrays.asList(new SchemaAndValueField("ts", NanoTimestamp.builder().optional().build(), expectedTs),
+                new SchemaAndValueField("tsneg", NanoTimestamp.builder().optional().build(), expectedNegTs),
                 new SchemaAndValueField("tz", ZonedTimestamp.builder().optional().build(), expectedTz),
                 new SchemaAndValueField("date", Date.builder().optional().build(), expectedDate),
                 new SchemaAndValueField("ti", MicroTime.builder().optional().build(), expectedTi),

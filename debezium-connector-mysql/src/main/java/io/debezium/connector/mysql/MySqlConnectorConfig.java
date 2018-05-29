@@ -6,10 +6,9 @@
 package io.debezium.connector.mysql;
 
 import java.math.BigDecimal;
-import java.util.Arrays;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Random;
-import java.util.stream.Collectors;
 
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
@@ -509,6 +508,14 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                          + "Each distinct MySQL installation should have a separate namespace and monitored by "
                                                          + "at most one Debezium connector.");
 
+    public static final Field ON_CONNECT_STATEMENTS = Field.create("database.initial.statements")
+                                                           .withDisplayName("Initial statements")
+                                                           .withType(Type.STRING)
+                                                           .withWidth(Width.LONG)
+                                                           .withImportance(Importance.LOW)
+                                                           .withDescription("A semicolon separated list of SQL statements to be executed when connection to database is established. "
+                                                                   + "Typically used for configuration of session parameters.");
+
     public static final Field SERVER_ID = Field.create("database.server.id")
                                                .withDisplayName("Cluster ID")
                                                .withType(Type.LONG)
@@ -711,6 +718,15 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                 .withDefault(true)
                                                 .withValidation(Field::isBoolean);
 
+    public static final Field KEEP_ALIVE_INTERVAL_MS = Field.create("connect.keep.alive.interval.ms")
+                                                            .withDisplayName("Keep alive interval (ms)")
+                                                            .withType(Type.LONG)
+                                                            .withWidth(Width.SHORT)
+                                                            .withImportance(Importance.LOW)
+                                                            .withDescription("Interval in milliseconds to wait for connection checking if keep alive thread is used.")
+                                                            .withDefault(Duration.ofMinutes(1).toMillis())
+                                                            .withValidation(Field::isPositiveInteger);
+
     public static final Field ROW_COUNT_FOR_STREAMING_RESULT_SETS = Field.create("min.row.count.to.stream.results")
                                                                          .withDisplayName("Stream result set of size")
                                                                          .withType(Type.LONG)
@@ -909,9 +925,9 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
     /**
      * The set of {@link Field}s defined as part of this configuration.
      */
-    public static Field.Set ALL_FIELDS = Field.setOf(USER, PASSWORD, HOSTNAME, PORT, SERVER_ID,
+    public static Field.Set ALL_FIELDS = Field.setOf(USER, PASSWORD, HOSTNAME, PORT, ON_CONNECT_STATEMENTS, SERVER_ID,
                                                      SERVER_NAME,
-                                                     CONNECTION_TIMEOUT_MS, KEEP_ALIVE,
+                                                     CONNECTION_TIMEOUT_MS, KEEP_ALIVE, KEEP_ALIVE_INTERVAL_MS,
                                                      CommonConnectorConfig.MAX_QUEUE_SIZE,
                                                      CommonConnectorConfig.MAX_BATCH_SIZE,
                                                      CommonConnectorConfig.POLL_INTERVAL_MS,
@@ -970,7 +986,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
 
     protected static ConfigDef configDef() {
         ConfigDef config = new ConfigDef();
-        Field.group(config, "MySQL", HOSTNAME, PORT, USER, PASSWORD, SERVER_NAME, SERVER_ID,
+        Field.group(config, "MySQL", HOSTNAME, PORT, USER, PASSWORD, ON_CONNECT_STATEMENTS, SERVER_NAME, SERVER_ID,
                     SSL_MODE, SSL_KEYSTORE, SSL_KEYSTORE_PASSWORD, SSL_TRUSTSTORE, SSL_TRUSTSTORE_PASSWORD, JDBC_DRIVER);
         Field.group(config, "History Storage", KafkaDatabaseHistory.BOOTSTRAP_SERVERS,
                     KafkaDatabaseHistory.TOPIC, KafkaDatabaseHistory.RECOVERY_POLL_ATTEMPTS,
@@ -982,7 +998,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                     GTID_SOURCE_INCLUDES, GTID_SOURCE_EXCLUDES, GTID_SOURCE_FILTER_DML_EVENTS, BUFFER_SIZE_FOR_BINLOG_READER,
                     Heartbeat.HEARTBEAT_INTERVAL, Heartbeat.HEARTBEAT_TOPICS_PREFIX, EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE, INCONSISTENT_SCHEMA_HANDLING_MODE,
                     CommonConnectorConfig.TOMBSTONES_ON_DELETE);
-        Field.group(config, "Connector", CONNECTION_TIMEOUT_MS, KEEP_ALIVE, CommonConnectorConfig.MAX_QUEUE_SIZE,
+        Field.group(config, "Connector", CONNECTION_TIMEOUT_MS, KEEP_ALIVE, KEEP_ALIVE_INTERVAL_MS, CommonConnectorConfig.MAX_QUEUE_SIZE,
                     CommonConnectorConfig.MAX_BATCH_SIZE, CommonConnectorConfig.POLL_INTERVAL_MS,
                     SNAPSHOT_MODE, SNAPSHOT_LOCKING_MODE, SNAPSHOT_MINIMAL_LOCKING, TIME_PRECISION_MODE, DECIMAL_HANDLING_MODE,
                     BIGINT_UNSIGNED_HANDLING_MODE, SNAPSHOT_DELAY_MINUTES);
@@ -1080,19 +1096,6 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
         // Sanity check, validate the configured value is a valid option.
         if (lockingModeValue == null) {
             problems.accept(SNAPSHOT_LOCKING_MODE, lockingModeValue, "Must be a valid snapshot.locking.mode value");
-            return 1;
-        }
-
-        // Determine the snapshot mode defined.
-        final SnapshotMode snapshotModeValue = SnapshotMode.parse(config.getString(MySqlConnectorConfig.SNAPSHOT_MODE));
-
-        // A value of SNAPSHOT_LOCKING_MODE 'none' is only valid when SNAPSHOT_MODE is configured to not include data.
-        if (lockingModeValue == SnapshotLockingMode.NONE && snapshotModeValue.includeData()) {
-            final String acceptableValues = Arrays.stream(SnapshotMode.values())
-                .filter(value -> !value.includeData())
-                .map(SnapshotMode::getValue)
-                .collect(Collectors.joining(", "));
-            problems.accept(SNAPSHOT_LOCKING_MODE, lockingModeValue, "Can only be set to 'none' when " + SNAPSHOT_MODE.name() + " is set to [" + acceptableValues + "]");
             return 1;
         }
 

@@ -14,7 +14,9 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.connect.data.Struct;
@@ -113,6 +115,7 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
         assertNoConfigurationErrors(result, MySqlConnectorConfig.COLUMN_BLACKLIST);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.CONNECTION_TIMEOUT_MS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.KEEP_ALIVE);
+        assertNoConfigurationErrors(result, MySqlConnectorConfig.KEEP_ALIVE_INTERVAL_MS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.MAX_QUEUE_SIZE);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.MAX_BATCH_SIZE);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.POLL_INTERVAL_MS);
@@ -166,6 +169,7 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
         assertNoConfigurationErrors(result, MySqlConnectorConfig.COLUMN_BLACKLIST);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.CONNECTION_TIMEOUT_MS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.KEEP_ALIVE);
+        assertNoConfigurationErrors(result, MySqlConnectorConfig.KEEP_ALIVE_INTERVAL_MS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.MAX_QUEUE_SIZE);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.MAX_BATCH_SIZE);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.POLL_INTERVAL_MS);
@@ -195,6 +199,7 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
                                             .with(KafkaDatabaseHistory.BOOTSTRAP_SERVERS, "some.host.com")
                                             .with(KafkaDatabaseHistory.TOPIC, "my.db.history.topic")
                                             .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                                            .with(MySqlConnectorConfig.ON_CONNECT_STATEMENTS, "SET SESSION wait_timeout=2000")
                                             .build();
         MySqlConnector connector = new MySqlConnector();
         Config result = connector.validate(config.asMap());
@@ -203,6 +208,7 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
         assertNoConfigurationErrors(result, MySqlConnectorConfig.PORT);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.USER);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.PASSWORD);
+        assertNoConfigurationErrors(result, MySqlConnectorConfig.ON_CONNECT_STATEMENTS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.SERVER_NAME);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.SERVER_ID);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.TABLES_IGNORE_BUILTIN);
@@ -213,6 +219,7 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
         assertNoConfigurationErrors(result, MySqlConnectorConfig.COLUMN_BLACKLIST);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.CONNECTION_TIMEOUT_MS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.KEEP_ALIVE);
+        assertNoConfigurationErrors(result, MySqlConnectorConfig.KEEP_ALIVE_INTERVAL_MS);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.MAX_QUEUE_SIZE);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.MAX_BATCH_SIZE);
         assertNoConfigurationErrors(result, MySqlConnectorConfig.POLL_INTERVAL_MS);
@@ -359,73 +366,35 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
     }
 
     /**
-     * Validates that SNAPSHOT_LOCKING_MODE 'none' is valid with SNAPSHOT_MODE values of
-     * 'none', 'schema_only', 'schema_only_recovery'
+     * Validates that SNAPSHOT_LOCKING_MODE 'none' is valid with all snapshot modes
      */
     @Test
-    @FixFor("DBZ-602")
+    @FixFor("DBZ-639")
     public void shouldValidateLockingModeNoneWithValidSnapshotModeConfiguration() {
-        final List<String> acceptableValues = Arrays.asList(
-            SnapshotMode.NEVER.getValue(),
-            SnapshotMode.SCHEMA_ONLY.getValue(),
-            SnapshotMode.SCHEMA_ONLY_RECOVERY.getValue()
-        );
+        final List<String> acceptableValues = Arrays.stream(SnapshotMode.values())
+                .map(SnapshotMode::getValue)
+                .collect(Collectors.toList());
 
         // Loop over all known valid values
         for (final String acceptableValue: acceptableValues) {
             Configuration config = DATABASE.defaultJdbcConfigBuilder()
-                .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
-                .with(MySqlConnectorConfig.SERVER_ID, 18765)
-                .with(MySqlConnectorConfig.SERVER_NAME, "myServer")
-                .with(KafkaDatabaseHistory.BOOTSTRAP_SERVERS, "some.host.com")
-                .with(KafkaDatabaseHistory.TOPIC, "my.db.history.topic")
-                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
+                    .with(MySqlConnectorConfig.SERVER_ID, 18765)
+                    .with(MySqlConnectorConfig.SERVER_NAME, "myServer")
+                    .with(KafkaDatabaseHistory.BOOTSTRAP_SERVERS, "some.host.com")
+                    .with(KafkaDatabaseHistory.TOPIC, "my.db.history.topic")
+                    .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
 
-                // Conflicting properties under test:
-                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, SnapshotLockingMode.NONE.getValue())
-                .with(MySqlConnectorConfig.SNAPSHOT_MODE, acceptableValue)
-                .build();
+                    // Conflicting properties under test:
+                    .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, SnapshotLockingMode.NONE.getValue())
+                    .with(MySqlConnectorConfig.SNAPSHOT_MODE, acceptableValue)
+                    .build();
 
             MySqlConnector connector = new MySqlConnector();
             Config result = connector.validate(config.asMap());
             assertNoConfigurationErrors(result, MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE);
 
             assertThat(new MySqlConnectorConfig(config).getSnapshotLockingMode()).isEqualTo(SnapshotLockingMode.NONE);
-        }
-    }
-
-    /**
-     * Validates that SNAPSHOT_LOCKING_MODE 'none' is invalid with SNAPSHOT_MODE values of
-     * 'when_needed', 'initial', 'initial_recovery'
-     */
-    @Test
-    @FixFor("DBZ-602")
-    public void shouldNotValidateLockingModeNoneWithInvalidSnapshotModeConfiguration() {
-        final List<String> invalidValues = Arrays.asList(
-            SnapshotMode.WHEN_NEEDED.getValue(),
-            SnapshotMode.INITIAL.getValue(),
-            SnapshotMode.INITIAL_ONLY.getValue()
-        );
-
-        // Loop over all known valid values
-        for (final String invalidValue: invalidValues) {
-            Configuration config = DATABASE.defaultJdbcConfigBuilder()
-                .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
-                .with(MySqlConnectorConfig.SERVER_ID, 18765)
-                .with(MySqlConnectorConfig.SERVER_NAME, "myServer")
-                .with(KafkaDatabaseHistory.BOOTSTRAP_SERVERS, "some.host.com")
-                .with(KafkaDatabaseHistory.TOPIC, "my.db.history.topic")
-                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
-
-                // Conflicting properties under test:
-                .with(MySqlConnectorConfig.SNAPSHOT_MINIMAL_LOCKING, false)
-                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, SnapshotLockingMode.NONE.getValue())
-                .with(MySqlConnectorConfig.SNAPSHOT_MODE, invalidValue)
-                .build();
-
-            MySqlConnector connector = new MySqlConnector();
-            Config result = connector.validate(config.asMap());
-            assertConfigurationErrors(result, MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE);
         }
     }
 
@@ -943,6 +912,10 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
         }
     }
 
+    private Struct getAfter(SourceRecord record) {
+        return (Struct)((Struct)record.value()).get("after");
+    }
+
     @Test
     public void shouldConsumeEventsWithNoSnapshot() throws SQLException, InterruptedException {
         Testing.Files.delete(DB_HISTORY_PATH);
@@ -963,8 +936,14 @@ public class MySqlConnectorIT extends AbstractConnectorTest {
         assertThat(records.recordsForTopic(RO_DATABASE.topicForTable("products_on_hand")).size()).isEqualTo(9);
         assertThat(records.recordsForTopic(RO_DATABASE.topicForTable("customers")).size()).isEqualTo(4);
         assertThat(records.recordsForTopic(RO_DATABASE.topicForTable("orders")).size()).isEqualTo(5);
+        assertThat(records.recordsForTopic(RO_DATABASE.topicForTable("Products")).size()).isEqualTo(9);
         assertThat(records.topics().size()).isEqualTo(4 + 1);
         assertThat(records.ddlRecordsForDatabase(RO_DATABASE.getDatabaseName()).size()).isEqualTo(6);
+
+        // check float value
+        Optional<SourceRecord> recordWithScientfic = records.recordsForTopic(RO_DATABASE.topicForTable("Products")).stream().filter(x -> "hammer2".equals(getAfter(x).get("name"))).findFirst();
+        assertThat(recordWithScientfic.isPresent());
+        assertThat(getAfter(recordWithScientfic.get()).get("weight")).isEqualTo(0.875);
 
         // Check that all records are valid, can be serialized and deserialized ...
         records.forEach(this::validate);
