@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>0.7.5</version>
+        <version>0.7.5-0.1</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -85,7 +85,7 @@
         </dependency>
     </dependencies>
     <properties>
-        <!-- 
+        <!--
         Specify the properties for the various Docker containers.
         -->
         <mysql.user>mysqluser</mysql.user>
@@ -212,7 +212,7 @@
                     </build>
                   </image>
                   <image>
-                    <!-- 
+                    <!--
                     A Docker image using a MySQL installation maintained by MySQL team
                     that is a replica of `debezium/mysql-server-gtids-test-database`
                     -->
@@ -286,7 +286,7 @@
                 </execution>
               </executions>
             </plugin>
-            <!-- 
+            <!--
             Unlike surefire, the failsafe plugin ensures 'post-integration-test' phase always runs, even
             when there are failed integration tests. We rely upon this to always shut down the Docker container
             after the integration tests (defined as '*IT.java') are run.
@@ -351,7 +351,7 @@
     -->
     <profiles>
         <!--  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-              This assembly profile is used during official builds. In addition to 
+              This assembly profile is used during official builds. In addition to
               compiling, and running the unit and integration tests like the non-assembly
               profiles, this profile creates additional (like the connector plugin archives),
               starts up all three Docker containers (normal MySQL, MySQL+GTIDs, and alt-MySQL)
@@ -400,8 +400,8 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <!-- 
-                    Override the failsafe plugin to run the integration tests for each set of databases. 
+                    <!--
+                    Override the failsafe plugin to run the integration tests for each set of databases.
                     But make sure each database server is used only once ...
                     -->
                     <plugin>
@@ -500,8 +500,8 @@
         </properties>
       </profile>
       <!--  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-            Use the Docker image for a MySQL replica of another MySQL server 
-            configured to use GTIDs. To use, specify "-Dmysql-replica" 
+            Use the Docker image for a MySQL replica of another MySQL server
+            configured to use GTIDs. To use, specify "-Dmysql-replica"
             or -Pmysql-replica on the Maven command line.
             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
 

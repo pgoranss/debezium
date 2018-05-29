@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>0.7.5</version>
+        <version>0.7.5-0.1</version>
         <relativePath>../</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -11,7 +11,7 @@
     <name>Debezium Connector for PostgreSQL</name>
     <packaging>jar</packaging>
     <properties>
-        <!-- 
+        <!--
           Specify the properties that will be used for setting up the integration tests' Docker container.
           Note that the `dockerhost.ip` property is computed from the IP address of DOCKER_HOST, which will
           work on all platforms. We'll set some of these as system properties during integration testing.
@@ -96,7 +96,7 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-   
+
     <build>
         <plugins>
             <plugin>
@@ -128,7 +128,7 @@
                     <images>
                         <image>
                             <!-- A Docker image using the Postgres Server with the DBZ decoderbufs plugin -->
-                            <name>${docker.filter}</name>  
+                            <name>${docker.filter}</name>
                             <run>
                                 <namingStrategy>none</namingStrategy>
                                 <env>
@@ -173,7 +173,7 @@
                     </execution>
                 </executions>
             </plugin>
-            <!-- 
+            <!--
             Unlike surefire, the failsafe plugin ensures 'post-integration-test' phase always runs, even
             when there are failed integration tests. We rely upon this to always shut down the Docker container
             after the integration tests (defined as '*IT.java') are run.
