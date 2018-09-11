@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.mysql;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.function.Predicate;
 
@@ -19,8 +20,9 @@ import io.debezium.config.Configuration;
 import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
 import io.debezium.function.Predicates;
-import io.debezium.heartbeat.Heartbeat;
+import io.debezium.relational.TableId;
 import io.debezium.relational.history.DatabaseHistory;
+import io.debezium.schema.TopicSelector;
 import io.debezium.util.LoggingContext;
 import io.debezium.util.Strings;
 
@@ -39,7 +41,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
     private final MySqlConnectorConfig connectorConfig;
     private final SourceInfo source;
     private final MySqlSchema dbSchema;
-    private final TopicSelector topicSelector;
+    private final TopicSelector<TableId> topicSelector;
     private final RecordMakers recordProcessor;
     private final Predicate<String> gtidSourceFilter;
     private final Predicate<String> ddlFilter;
@@ -61,11 +63,11 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
         this.connectionContext = new MySqlJdbcContext(config);
 
         // Set up the topic selector ...
-        this.topicSelector = TopicSelector.defaultSelector(serverName(), getHeartbeatTopicsPrefix());
+        this.topicSelector = MySqlTopicSelector.defaultSelector(connectorConfig.getLogicalName(), connectorConfig.getHeartbeatTopicsPrefix());
 
         // Set up the source information ...
         this.source = new SourceInfo();
-        this.source.setServerName(serverName());
+        this.source.setServerName(connectorConfig.getLogicalName());
 
         // Set up the GTID filter ...
         String gtidSetIncludes = config.getString(MySqlConnectorConfig.GTID_SOURCE_INCLUDES);
@@ -74,13 +76,13 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
                 : (gtidSetExcludes != null ? Predicates.excludesUuids(gtidSetExcludes) : null);
 
         if (tableIdCaseInsensitive == null) {
-            this.tableIdCaseInsensitive = !"0".equals(connectionContext.readMySqlSystemVariables(null).get(MySqlSystemVariables.LOWER_CASE_TABLE_NAMES));
+            this.tableIdCaseInsensitive = !"0".equals(connectionContext.readMySqlSystemVariables().get(MySqlSystemVariables.LOWER_CASE_TABLE_NAMES));
         } else {
             this.tableIdCaseInsensitive = tableIdCaseInsensitive;
         }
 
         // Set up the MySQL schema ...
-        this.dbSchema = new MySqlSchema(config, serverName(), this.gtidSourceFilter, this.tableIdCaseInsensitive, topicSelector);
+        this.dbSchema = new MySqlSchema(connectorConfig, this.gtidSourceFilter, this.tableIdCaseInsensitive, topicSelector);
 
         // Set up the record processor ...
         this.recordProcessor = new RecordMakers(dbSchema, source, topicSelector, config.getBoolean(CommonConnectorConfig.TOMBSTONES_ON_DELETE));
@@ -106,7 +108,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
         return config.getString("name");
     }
 
-    public TopicSelector topicSelector() {
+    public TopicSelector<TableId> topicSelector() {
         return topicSelector;
     }
 
@@ -138,7 +140,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      */
     public void initializeHistory() {
         // Read the system variables from the MySQL instance and get the current database name ...
-        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables(null);
+        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables();
         String ddlStatement = connectionContext.setStatementFor(variables);
 
         // And write them into the database history ...
@@ -154,7 +156,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      */
     public void loadHistory(SourceInfo startingPoint) {
         // Read the system variables from the MySQL instance and load them into the DDL parser as defaults ...
-        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables(null);
+        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables();
         dbSchema.setSystemVariables(variables);
 
         // And then load the history ...
@@ -178,7 +180,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      */
     public boolean historyExists() {
         // Read the system variables from the MySQL instance and load them into the DDL parser as defaults ...
-        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables(null);
+        Map<String, String> variables = connectionContext.readMySqlCharsetSystemVariables();
         dbSchema.setSystemVariables(variables);
 
         // And then load the history ...
@@ -196,10 +198,6 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
         return config.getLong(MySqlConnectorConfig.SERVER_ID);
     }
 
-    public String serverName() {
-        return config.getString(MySqlConnectorConfig.SERVER_NAME);
-    }
-
     public long timeoutInMilliseconds() {
         return config.getLong(MySqlConnectorConfig.CONNECTION_TIMEOUT_MS);
     }
@@ -214,6 +212,10 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
 
     public boolean includeSchemaChangeRecords() {
         return config.getBoolean(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES);
+    }
+
+    public boolean includeSqlQuery() {
+        return config.getBoolean(MySqlConnectorConfig.INCLUDE_SQL_QUERY);
     }
 
     public boolean isSnapshotAllowedWhenNeeded() {
@@ -245,8 +247,8 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
         return config.getString(MySqlConnectorConfig.SNAPSHOT_SELECT_STATEMENT_OVERRIDES_BY_TABLE);
     }
 
-    public String getHeartbeatTopicsPrefix() {
-        return config.getString(Heartbeat.HEARTBEAT_TOPICS_PREFIX);
+    public Duration snapshotDelay() {
+        return Duration.ofMillis(config.getLong(MySqlConnectorConfig.SNAPSHOT_DELAY_MS));
     }
 
     public void start() {
@@ -276,7 +278,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      * @throws IllegalArgumentException if any of the parameters are null
      */
     public void temporaryLoggingContext(String contextName, Runnable operation) {
-        LoggingContext.temporarilyForConnector("MySQL", serverName(), contextName, operation);
+        LoggingContext.temporarilyForConnector("MySQL", connectorConfig.getLogicalName(), contextName, operation);
     }
 
     /**
@@ -287,7 +289,7 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      */
     public ObjectName metricName(String contextName) throws MalformedObjectNameException {
         //return new ObjectName("debezium.mysql:type=connector-metrics,connector=" + serverName() + ",name=" + contextName);
-        return new ObjectName("debezium.mysql:type=connector-metrics,context=" + contextName + ",server=" + serverName());
+        return new ObjectName("debezium.mysql:type=connector-metrics,context=" + contextName + ",server=" + connectorConfig.getLogicalName());
     }
 
     /**

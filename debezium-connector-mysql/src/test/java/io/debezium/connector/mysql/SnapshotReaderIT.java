@@ -30,6 +30,7 @@ import io.debezium.data.KeyValueStore;
 import io.debezium.data.KeyValueStore.Collection;
 import io.debezium.data.SchemaChangeHistory;
 import io.debezium.data.VerifyRecord;
+import io.debezium.heartbeat.Heartbeat;
 import io.debezium.util.Testing;
 
 /**
@@ -78,7 +79,10 @@ public class SnapshotReaderIT {
     protected Configuration.Builder simpleConfig() {
         return DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
-                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL);
+                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL)
+                // Explicitly enable INCLUDE_SQL_QUERY connector option. For snapshots it should have no effect as
+                // source query should not included in snapshot events.
+                .with(MySqlConnectorConfig.INCLUDE_SQL_QUERY, true);
     }
 
     @Test
@@ -102,6 +106,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -198,6 +203,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
                 System.out.println(record);
@@ -301,6 +307,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -399,6 +406,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -428,6 +436,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -475,6 +484,7 @@ public class SnapshotReaderIT {
         }
         assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
     }
+
     @Test
     public void shouldSnapshotTablesInLexicographicalOrder() throws Exception{
         config = simpleConfig()
@@ -494,6 +504,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 if (record.value() != null)
                     tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
             });
@@ -508,9 +519,14 @@ public class SnapshotReaderIT {
             tablesInOrderExpected.add(table);
         return tablesInOrderExpected;
     }
-    
+
+    @Test
     public void shouldCreateSnapshotSchemaOnly() throws Exception {
-        config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY).build();
+        config = simpleConfig()
+                    .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY)
+                    .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                    .with(Heartbeat.HEARTBEAT_INTERVAL, 300_000)
+                    .build();
         context = new MySqlTaskContext(config);
         context.start();
         reader = new SnapshotReader("snapshot", context);
@@ -525,27 +541,45 @@ public class SnapshotReaderIT {
         List<SourceRecord> records = null;
         KeyValueStore store = KeyValueStore.createForTopicsBeginningWith(DATABASE.getServerName() + ".");
         SchemaChangeHistory schemaChanges = new SchemaChangeHistory(DATABASE.getServerName());
+
+        SourceRecord heartbeatRecord = null;
+
         while ((records = reader.poll()) != null) {
+            assertThat(heartbeatRecord).describedAs("Heartbeat record must be the last one").isNull();
+            if (heartbeatRecord == null &&
+                    records.size() > 0 &&
+                    records.get(records.size() - 1).topic().startsWith("__debezium-heartbeat")) {
+                heartbeatRecord = records.get(records.size() - 1);
+            }
             records.forEach(record -> {
-                VerifyRecord.isValid(record);
-                store.add(record);
-                schemaChanges.add(record);
+                if (!record.topic().startsWith("__debezium-heartbeat")) {
+                    assertThat(record.sourceOffset().get("snapshot")).isEqualTo(true);
+                    VerifyRecord.isValid(record);
+                    VerifyRecord.hasNoSourceQuery(record);
+                    store.add(record);
+                    schemaChanges.add(record);
+                }
             });
         }
         // The last poll should always return null ...
         assertThat(records).isNull();
 
-        // There should be no schema changes ...
-        assertThat(schemaChanges.recordCount()).isEqualTo(0);
+        // There should be schema changes ...
+        assertThat(schemaChanges.recordCount()).isEqualTo(14);
 
         // Check the records via the store ...
         assertThat(store.collectionCount()).isEqualTo(0);
+
+        // Check that heartbeat has arrived
+        assertThat(heartbeatRecord).isNotNull();
+        assertThat(heartbeatRecord.sourceOffset().get("snapshot")).isNotEqualTo(true);
 
         // Make sure the snapshot completed ...
         if (completed.await(10, TimeUnit.SECONDS)) {
             // completed the snapshot ...
             Testing.print("completed the snapshot");
-        } else {
+        }
+        else {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }

@@ -65,7 +65,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
                                          boolean dropSlotOnClose,
                                          Integer statusUpdateIntervalMillis,
                                          TypeRegistry typeRegistry) {
-        super(config, PostgresConnection.FACTORY, null, PostgresReplicationConnection::defaultSettings);
+        super(config, PostgresConnection.FACTORY, null ,PostgresReplicationConnection::defaultSettings);
 
         this.originalConfig = config;
         this.slotName = slotName;
@@ -88,7 +88,7 @@ public class PostgresReplicationConnection extends JdbcConnection implements Rep
         }
     }
 
-    protected void initReplicationSlot() throws SQLException {
+    protected void initReplicationSlot() throws SQLException, InterruptedException {
         final String postgresPluginName = plugin.getPostgresPluginName();
         ServerInfo.ReplicationSlot slotInfo;
         try (PostgresConnection connection = new PostgresConnection(originalConfig)) {

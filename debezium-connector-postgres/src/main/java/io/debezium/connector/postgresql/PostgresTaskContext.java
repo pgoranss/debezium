@@ -12,6 +12,8 @@ import io.debezium.annotation.ThreadSafe;
 import io.debezium.connector.common.CdcSourceTaskContext;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.ReplicationConnection;
+import io.debezium.relational.TableId;
+import io.debezium.schema.TopicSelector;
 
 /**
  * The context of a {@link PostgresConnectorTask}. This deals with most of the brunt of reading various configuration options
@@ -23,11 +25,11 @@ import io.debezium.connector.postgresql.connection.ReplicationConnection;
 public class PostgresTaskContext extends CdcSourceTaskContext {
 
     private final PostgresConnectorConfig config;
-    private final TopicSelector topicSelector;
+    private final TopicSelector<TableId> topicSelector;
     private final PostgresSchema schema;
 
-    protected PostgresTaskContext(PostgresConnectorConfig config, PostgresSchema schema, TopicSelector topicSelector) {
-        super("Postgres", config.serverName());
+    protected PostgresTaskContext(PostgresConnectorConfig config, PostgresSchema schema, TopicSelector<TableId> topicSelector) {
+        super("Postgres", config.getLogicalName());
 
         this.config = config;
         this.topicSelector = topicSelector;
@@ -35,7 +37,7 @@ public class PostgresTaskContext extends CdcSourceTaskContext {
         this.schema = schema;
     }
 
-    protected TopicSelector topicSelector() {
+    protected TopicSelector<TableId> topicSelector() {
         return topicSelector;
     }
 

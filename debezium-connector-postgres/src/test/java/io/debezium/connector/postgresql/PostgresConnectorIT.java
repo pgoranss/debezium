@@ -44,6 +44,7 @@ import io.debezium.connector.postgresql.PostgresConnectorConfig.LogicalDecoder;
 import io.debezium.connector.postgresql.connection.ReplicationConnection;
 import io.debezium.data.Envelope;
 import io.debezium.data.VerifyRecord;
+import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.embedded.EmbeddedEngine;
 import io.debezium.jdbc.TemporalPrecisionMode;
@@ -67,7 +68,7 @@ public class PostgresConnectorIT extends AbstractConnectorTest {
                                                     "CREATE SCHEMA s1; " +
                                                     "CREATE SCHEMA s2; " +
                                                     "CREATE TABLE s1.a (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
-                                                    "CREATE TABLE s2.a (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                                                    "CREATE TABLE s2.a (pk SERIAL, aa integer, bb varchar(20), PRIMARY KEY(pk));" +
                                                     INSERT_STMT;
     private PostgresConnector connector;
 
@@ -120,7 +121,6 @@ public class PostgresConnectorIT extends AbstractConnectorTest {
         // validate that the required fields have errors
         assertConfigurationErrors(validatedConfig, PostgresConnectorConfig.HOSTNAME, 1);
         assertConfigurationErrors(validatedConfig, PostgresConnectorConfig.USER, 1);
-        assertConfigurationErrors(validatedConfig, PostgresConnectorConfig.PASSWORD, 1);
         assertConfigurationErrors(validatedConfig, PostgresConnectorConfig.DATABASE_NAME, 1);
 
         // validate the non required fields
@@ -149,7 +149,7 @@ public class PostgresConnectorIT extends AbstractConnectorTest {
         validateField(validatedConfig, PostgresConnectorConfig.TIME_PRECISION_MODE, TemporalPrecisionMode.ADAPTIVE);
         validateField(validatedConfig, PostgresConnectorConfig.DECIMAL_HANDLING_MODE, PostgresConnectorConfig.DecimalHandlingMode.PRECISE);
         validateField(validatedConfig, PostgresConnectorConfig.SSL_SOCKET_FACTORY, null);
-        validateField(validatedConfig, PostgresConnectorConfig.TCP_KEEPALIVE, null);
+        validateField(validatedConfig, PostgresConnectorConfig.TCP_KEEPALIVE, true);
    }
 
     @Test
@@ -243,18 +243,24 @@ public class PostgresConnectorIT extends AbstractConnectorTest {
     }
 
     @Test
+    @FixFor("DBZ-693")
     public void shouldExecuteOnConnectStatements() throws Exception {
         TestHelper.execute(SETUP_TABLES_STMT);
         Configuration.Builder configBuilder = TestHelper.defaultConfig()
                                                .with(PostgresConnectorConfig.SNAPSHOT_MODE, INITIAL.getValue())
-                                               .with(PostgresConnectorConfig.ON_CONNECT_STATEMENTS, "INSERT INTO s1.a (aa) VALUES (2); INSERT INTO s2.a (aa) VALUES (2)")
+                                               .with(PostgresConnectorConfig.ON_CONNECT_STATEMENTS, "INSERT INTO s1.a (aa) VALUES (2); INSERT INTO s2.a (aa, bb) VALUES (2, 'hello;; world');")
                                                .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, Boolean.FALSE);
         start(PostgresConnector.class, configBuilder.build());
         assertConnectorIsRunning();
 
-        SourceRecords actualRecords = consumeRecordsByTopic(2);
+        SourceRecords actualRecords = consumeRecordsByTopic(7);
         assertKey(actualRecords.allRecordsInOrder().get(0), "pk", 1);
         assertKey(actualRecords.allRecordsInOrder().get(1), "pk", 2);
+
+        // JdbcConnection#connection() is called multiple times during connector start-up,
+        // so the given statements will be executed multiple times, resulting in multiple
+        // records; here we're interested just in the first insert for s2.a
+        assertValueField(actualRecords.allRecordsInOrder().get(6), "after/bb", "hello; world");
     }
 
     @Test
@@ -402,6 +408,35 @@ public class PostgresConnectorIT extends AbstractConnectorTest {
                              "INSERT INTO s2.a (aa) VALUES (7);";
         TestHelper.execute(insertStmt);
         assertNoRecordsToConsume();
+    }
+
+    @Test
+    @FixFor("DBZ-878")
+    public void shouldReplaceInvalidTopicNameCharacters() throws Exception {
+        String setupStmt = SETUP_TABLES_STMT +
+                           "CREATE TABLE s1.\"dbz_878_some|test@data\" (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                           "INSERT INTO s1.\"dbz_878_some|test@data\" (aa) VALUES (123);";
+
+        TestHelper.execute(setupStmt);
+        Configuration.Builder configBuilder = TestHelper.defaultConfig()
+                                                        .with(PostgresConnectorConfig.SNAPSHOT_MODE, INITIAL.getValue())
+                                                        .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, Boolean.TRUE)
+                                                        .with(PostgresConnectorConfig.SCHEMA_WHITELIST, "s1")
+                                                        .with(PostgresConnectorConfig.TABLE_WHITELIST, "s1\\.dbz_878_some\\|test@data");
+
+        start(PostgresConnector.class, configBuilder.build());
+        assertConnectorIsRunning();
+
+        SourceRecords actualRecords = consumeRecordsByTopic(1);
+
+        List<SourceRecord> records = actualRecords.recordsForTopic(topicName("s1.dbz_878_some_test_data"));
+        assertThat(records.size()).isEqualTo(1);
+
+        SourceRecord record = records.get(0);
+        VerifyRecord.isValidRead(record, PK_FIELD, 1);
+
+        String sourceTable = ((Struct)record.value()).getStruct("source").getString("table");
+        assertThat(sourceTable).isEqualTo("dbz_878_some|test@data");
     }
 
     private void assertFieldAbsent(SourceRecord record, String fieldName) {

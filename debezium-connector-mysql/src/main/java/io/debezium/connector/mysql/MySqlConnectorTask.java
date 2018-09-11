@@ -21,6 +21,7 @@ import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
+import io.debezium.schema.TopicSelector;
 import io.debezium.util.LoggingContext.PreviousContext;
 
 /**
@@ -165,11 +166,16 @@ public final class MySqlConnectorTask extends BaseSourceTask {
                 // We're supposed to start with a snapshot, so set that up ...
                 SnapshotReader snapshotReader = new SnapshotReader("snapshot", taskContext);
                 if (snapshotEventsAreInserts) snapshotReader.generateInsertEvents();
+
+                if (!taskContext.snapshotDelay().isZero()) {
+                    // Adding a timed blocking reader to delay the snapshot, can help to avoid initial rebalancing interruptions
+                    chainedReaderBuilder.addReader(new TimedBlockingReader("timed-blocker", taskContext.snapshotDelay()));
+                }
                 chainedReaderBuilder.addReader(snapshotReader);
 
                 if (taskContext.isInitialSnapshotOnly()) {
                     logger.warn("This connector will only perform a snapshot, and will stop after that completes.");
-                    chainedReaderBuilder.addReader(new BlockingReader("blocker"));
+                    chainedReaderBuilder.addReader(new BlockingReader("blocker", "Connector has completed all of its work but will continue in the running state. It can be shut down at any time."));
                     chainedReaderBuilder.completionMessage("Connector configured to only perform snapshot, and snapshot completed successfully. Connector will terminate.");
                 } else {
                     if (!rowBinlogEnabled) {
@@ -313,7 +319,8 @@ public final class MySqlConnectorTask extends BaseSourceTask {
                     logNames.add(rs.getString(1));
                 }
             });
-        } catch (SQLException e) {
+        }
+        catch (SQLException e) {
             throw new ConnectException("Unexpected error while connecting to MySQL and looking for binary logs: ", e);
         }
 
@@ -322,7 +329,10 @@ public final class MySqlConnectorTask extends BaseSourceTask {
         if (!found) {
             logger.info("Connector requires binlog file '{}', but MySQL only has {}", binlogFilename, String.join(", ", logNames));
         }
-        logger.info("MySQL has the binlog file '{}' required by the connector", binlogFilename);
+        else {
+            logger.info("MySQL has the binlog file '{}' required by the connector", binlogFilename);
+        }
+
         return found;
     }
 
@@ -359,7 +369,7 @@ public final class MySqlConnectorTask extends BaseSourceTask {
         try {
             connectionContext.jdbc().query("SHOW GLOBAL VARIABLES LIKE 'GTID_MODE'", rs -> {
                 if (rs.next()) {
-                    mode.set(rs.getString(1));
+                    mode.set(rs.getString(2));
                 }
             });
         } catch (SQLException e) {

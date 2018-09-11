@@ -30,7 +30,7 @@
           timeout: 45
     triggers:
       - reverse:
-          jobs: 'debezium-postgresql-9.6-legacy-test'
+          jobs: 'debezium-kafka-1.x-test'
     builders:
       - maven-target:
           maven-version: (Default)

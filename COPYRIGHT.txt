@@ -1,5 +1,6 @@
 Aaron Rosenberg
 Akshath Patkar
+Andreas Bergmeier
 Andras Istvan Nagy
 Andrew Tongen
 Andrey Pustovetov
@@ -9,12 +10,14 @@ Ben Williams
 Brandon Maguire
 Chris Riccomini
 Christian Posta
+Cliff Wheadon
 David Chen
 David Leibovic
 David Szabo
 Denis Mikhaylov
 Dennis Persson
 Duncan Sands
+Echo Xu
 Emrul Islam
 Eric S. Kreiseir
 Ewen Cheslack-Postava
@@ -31,12 +34,16 @@ MaoXiang Pan
 Mario Mueller
 Matteo Capitanio
 Matthias Wessendorf
+Olavi Mustanoja
 Omar Al-Safi
+Ori Popowski
+Orr Ganani
 Peter Goransson
 Prannoy Mittal
 Raf Liwoch
 Ramesh Reddy
 Randall Hauch
+Roman Kuchar
 Sagar Rao
 René Kerner
 Sairam Polavarapu
@@ -49,4 +56,5 @@ Stanley Shyiko
 Stephen Powis
 Steven Siahetiong
 Tom Bentley
+WenZe Hu
 Willie Cheong

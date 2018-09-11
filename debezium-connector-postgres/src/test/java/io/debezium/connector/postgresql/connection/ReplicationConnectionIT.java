@@ -22,12 +22,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 import org.apache.kafka.connect.errors.ConnectException;
-import org.fest.assertions.Assertions;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.connector.postgresql.DecoderDifferences;
 import io.debezium.connector.postgresql.TestHelper;
+import io.debezium.jdbc.JdbcConnection.ResultSetMapper;
 import io.debezium.util.Clock;
 import io.debezium.util.Metronome;
 
@@ -77,15 +78,36 @@ public class ReplicationConnectionIT {
 
     @Test
     public void shouldCloseConnectionOnInvalidSlotName() throws Exception {
+        final int closeRetries = 60;
+        final int waitPeriod = 2_000;
+        final String slotQuery = "select count(*) from pg_stat_replication where state = 'startup'";
+        final ResultSetMapper<Integer> slotQueryMapper = rs -> {
+            rs.next();
+            return rs.getInt(1);
+        };
+        final int slotsBefore;
+
+        try (PostgresConnection connection = TestHelper.create()) {
+            slotsBefore = connection.queryAndMap(slotQuery, slotQueryMapper);
+        }
+
         try (ReplicationConnection conn1 = TestHelper.createForReplication("test1-", true)) {
             conn1.startStreaming();
             fail("Invalid slot name should fail");
         }
         catch (Exception e) {
-            PostgresConnection connection = TestHelper.create();
-            connection.execute(x -> {
-                Assertions.assertThat(x.executeQuery("select * from pg_stat_replication where state = 'startup'").next()).as("Connection should not be active").isFalse();
-            });
+            try (PostgresConnection connection = TestHelper.create()) {
+                final int slotsAfter = connection.queryAndMap(slotQuery, slotQueryMapper);
+                for (int retry = 1; retry <= closeRetries; retry++) {
+                    if (slotsAfter <= slotsBefore) {
+                        break;
+                    }
+                    if (retry == closeRetries) {
+                        Assert.fail("Connection should not be active");
+                    }
+                    Thread.sleep(waitPeriod);
+                }
+            }
         }
     }
 

@@ -13,16 +13,17 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Duration;
-import java.util.List;
-import java.util.Arrays;
-import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.Collections;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -37,6 +38,7 @@ import org.apache.kafka.connect.source.SourceRecord;
 import io.debezium.connector.mysql.RecordMakers.RecordsForTable;
 import io.debezium.function.BufferedBlockingConsumer;
 import io.debezium.function.Predicates;
+import io.debezium.heartbeat.Heartbeat;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.jdbc.JdbcConnection.StatementFactory;
 import io.debezium.relational.Column;
@@ -117,7 +119,7 @@ public class SnapshotReader extends AbstractReader {
      */
     @Override
     protected void doStart() {
-        executorService = Threads.newSingleThreadExecutor(MySqlConnector.class, context.serverName(), "snapshot");
+        executorService = Threads.newSingleThreadExecutor(MySqlConnector.class, context.getConnectorConfig().getLogicalName(), "snapshot");
         executorService.execute(this::execute);
     }
 
@@ -137,6 +139,12 @@ public class SnapshotReader extends AbstractReader {
     protected Object readField(ResultSet rs, int fieldNo, Column actualColumn) throws SQLException {
         if(actualColumn.jdbcType() == Types.TIME) {
             return readTimeField(rs, fieldNo);
+        }
+        // This is for DATETIME columns (a logical date + time without time zone)
+        // by reading them with a calendar based on the default time zone, we make sure that the value
+        // is constructed correctly using the database's (or connection's) time zone
+        else if (actualColumn.jdbcType() == Types.TIMESTAMP) {
+            return rs.getTimestamp(fieldNo, Calendar.getInstance());
         }
         else {
             return rs.getObject(fieldNo);
@@ -238,7 +246,7 @@ public class SnapshotReader extends AbstractReader {
             mysql.execute(sql.get());
 
             // Generate the DDL statements that set the charset-related system variables ...
-            Map<String, String> systemVariables = connectionContext.readMySqlCharsetSystemVariables(sql);
+            Map<String, String> systemVariables = connectionContext.readMySqlCharsetSystemVariables();
             String setSystemVariablesStatement = connectionContext.setStatementFor(systemVariables);
             AtomicBoolean interrupted = new AtomicBoolean(false);
             long lockAcquired = 0L;
@@ -402,7 +410,7 @@ public class SnapshotReader extends AbstractReader {
                     schema.applyDdl(source, null, setSystemVariablesStatement, this::enqueueSchemaChanges);
 
                     // Add DROP TABLE statements for all tables that we knew about AND those tables found in the databases ...
-                    List<TableId> allTableIds = new ArrayList<>(schema.tables().tableIds());
+                    List<TableId> allTableIds = new ArrayList<>(schema.tableIds());
                     allTableIds.addAll(tableIds);
                     allTableIds.stream()
                                .filter(id -> isRunning()) // ignore all subsequent tables if this reader is stopped
@@ -411,7 +419,7 @@ public class SnapshotReader extends AbstractReader {
                                                                    this::enqueueSchemaChanges));
 
                     // Add a DROP DATABASE statement for each database that we no longer know about ...
-                    schema.tables().tableIds().stream().map(TableId::catalog)
+                    schema.tableIds().stream().map(TableId::catalog)
                           .filter(Predicates.not(readableDatabaseNames::contains))
                           .filter(id -> isRunning()) // ignore all subsequent tables if this reader is stopped
                           .forEach(missingDbName -> schema.applyDdl(source, missingDbName,
@@ -560,6 +568,7 @@ public class SnapshotReader extends AbstractReader {
                                                 long stop = clock.currentTimeInMillis();
                                                 logger.info("Step {}: - {} of {} rows scanned from table '{}' after {}",
                                                             stepNum, rowNum, rowCountStr, tableId, Strings.duration(stop - start));
+                                                metrics.setRowsScanned(tableId.toString(), rowNum);
                                             }
                                         }
 
@@ -568,6 +577,7 @@ public class SnapshotReader extends AbstractReader {
                                             long stop = clock.currentTimeInMillis();
                                             logger.info("Step {}: - Completed scanning a total of {} rows from table '{}' after {}",
                                                         stepNum, rowNum, tableId, Strings.duration(stop - start));
+                                            metrics.setRowsScanned(tableId.toString(), rowNum);
                                         }
                                     } catch (InterruptedException e) {
                                         Thread.interrupted();
@@ -674,6 +684,13 @@ public class SnapshotReader extends AbstractReader {
                     // Mark the source as having completed the snapshot. This will ensure the `source` field on records
                     // are not denoted as a snapshot ...
                     source.completeSnapshot();
+                    Heartbeat
+                        .create(
+                                context.config(),
+                                context.topicSelector().getHeartbeatTopic(),
+                                context.getConnectorConfig().getLogicalName()
+                        )
+                        .forcedBeat(source.partition(), source.offset(), this::enqueueRecord);
                 } finally {
                     // Set the completion flag ...
                     completeSuccessfully();

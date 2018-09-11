@@ -8,6 +8,8 @@ package io.debezium.connector.postgresql.connection.wal2json;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -38,6 +40,7 @@ import io.debezium.data.SpecialValueDecimal;
 import io.debezium.document.Array;
 import io.debezium.document.Document;
 import io.debezium.document.Value;
+import io.debezium.time.Conversions;
 import io.debezium.util.Strings;
 
 /**
@@ -253,7 +256,8 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
 
             case "timestamp":
             case "timestamp without time zone":
-                return DateTimeFormat.get().timestamp(rawValue.asString());
+                final LocalDateTime serverLocal = Conversions.fromNanosToLocalDateTimeUTC(DateTimeFormat.get().timestamp(rawValue.asString()));
+                return Conversions.toEpochNanos(serverLocal.toInstant(ZoneOffset.UTC));
 
             case "time":
             case "time without time zone":

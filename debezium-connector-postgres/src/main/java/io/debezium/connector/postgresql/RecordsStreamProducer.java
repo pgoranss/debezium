@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -29,6 +30,7 @@ import io.debezium.connector.postgresql.connection.ReplicationMessage;
 import io.debezium.connector.postgresql.connection.ReplicationStream;
 import io.debezium.data.Envelope;
 import io.debezium.function.BlockingConsumer;
+import io.debezium.heartbeat.Heartbeat;
 import io.debezium.relational.Column;
 import io.debezium.relational.ColumnEditor;
 import io.debezium.relational.Table;
@@ -53,7 +55,10 @@ public class RecordsStreamProducer extends RecordsProducer {
     private final ExecutorService executorService;
     private final ReplicationConnection replicationConnection;
     private final AtomicReference<ReplicationStream> replicationStream;
+    private final AtomicBoolean cleanupExecuted = new AtomicBoolean();
     private PgConnection typeResolverConnection = null;
+
+    private final Heartbeat heartbeat;
 
     @FunctionalInterface
     public static interface PgConnectionSupplier {
@@ -69,13 +74,16 @@ public class RecordsStreamProducer extends RecordsProducer {
     public RecordsStreamProducer(PostgresTaskContext taskContext,
                                  SourceInfo sourceInfo) {
         super(taskContext, sourceInfo);
-        executorService = Threads.newSingleThreadExecutor(PostgresConnector.class, taskContext.config().serverName(), CONTEXT_NAME);
+        executorService = Threads.newSingleThreadExecutor(PostgresConnector.class, taskContext.config().getLogicalName(), CONTEXT_NAME);
         this.replicationStream = new AtomicReference<>();
         try {
             this.replicationConnection = taskContext.createReplicationConnection();
         } catch (SQLException e) {
             throw new ConnectException(e);
         }
+
+        heartbeat = Heartbeat.create(taskContext.config().getConfig(), taskContext.topicSelector().getHeartbeatTopic(),
+                taskContext.config().getLogicalName());
     }
 
     @Override
@@ -159,7 +167,7 @@ public class RecordsStreamProducer extends RecordsProducer {
         LoggingContext.PreviousContext previousContext = taskContext.configureLoggingContext(CONTEXT_NAME);
 
         try {
-            if (replicationStream.get() == null) {
+            if (!cleanupExecuted.compareAndSet(false, true)) {
                 logger.debug("already stopped....");
                 return;
             }
@@ -220,41 +228,43 @@ public class RecordsStreamProducer extends RecordsProducer {
         // update the source info with the coordinates for this message
         long commitTimeNs = message.getCommitTime();
         long txId = message.getTransactionId();
-        sourceInfo.update(lsn, commitTimeNs, txId);
+        sourceInfo.update(lsn, commitTimeNs, txId, tableId);
         if (logger.isDebugEnabled()) {
             logger.debug("received new message at position {}\n{}", ReplicationConnection.format(lsn), message);
         }
 
         TableSchema tableSchema = tableSchemaFor(tableId);
-        if (tableSchema == null) {
-            return;
-        }
-        if (tableSchema.keySchema() == null) {
-            logger.warn("ignoring message for table '{}' because it does not have a primary key defined", tableId);
+        if (tableSchema != null) {
+            if (tableSchema.keySchema() == null) {
+                logger.warn("ignoring message for table '{}' because it does not have a primary key defined", tableId);
+            }
+
+            ReplicationMessage.Operation operation = message.getOperation();
+            switch (operation) {
+                case INSERT: {
+                    Object[] row = columnValues(message.getNewTupleList(), tableId, true, message.hasTypeMetadata());
+                    generateCreateRecord(tableId, row, message.isLastEventForLsn(), consumer);
+                    break;
+                }
+                case UPDATE: {
+                    Object[] newRow = columnValues(message.getNewTupleList(), tableId, true, message.hasTypeMetadata());
+                    Object[] oldRow = columnValues(message.getOldTupleList(), tableId, false, message.hasTypeMetadata());
+                    generateUpdateRecord(tableId, oldRow, newRow, message.isLastEventForLsn(), consumer);
+                    break;
+                }
+                case DELETE: {
+                    Object[] row = columnValues(message.getOldTupleList(), tableId, false, message.hasTypeMetadata());
+                    generateDeleteRecord(tableId, row, message.isLastEventForLsn(), consumer);
+                    break;
+                }
+                default: {
+                   logger.warn("unknown message operation: " + operation);
+                }
+            }
         }
 
-        ReplicationMessage.Operation operation = message.getOperation();
-        switch (operation) {
-            case INSERT: {
-                Object[] row = columnValues(message.getNewTupleList(), tableId, true, message.hasTypeMetadata());
-                generateCreateRecord(tableId, row, message.isLastEventForLsn(), consumer);
-                break;
-            }
-            case UPDATE: {
-                Object[] newRow = columnValues(message.getNewTupleList(), tableId, true, message.hasTypeMetadata());
-                Object[] oldRow = columnValues(message.getOldTupleList(), tableId, false, message.hasTypeMetadata());
-                generateUpdateRecord(tableId, oldRow, newRow, message.isLastEventForLsn(), consumer);
-                break;
-            }
-            case DELETE: {
-                Object[] row = columnValues(message.getOldTupleList(), tableId, false, message.hasTypeMetadata());
-                generateDeleteRecord(tableId, row, message.isLastEventForLsn(), consumer);
-                break;
-            }
-            default: {
-               logger.warn("unknown message operation: " + operation);
-            }
-        }
+        heartbeat.heartbeat(sourceInfo.partition(), sourceInfo.offset(),
+                r -> consumer.accept(new ChangeEvent(r, message.isLastEventForLsn())));
     }
 
     protected void generateCreateRecord(TableId tableId, Object[] rowData, boolean isLastEventForLsn, BlockingConsumer<ChangeEvent> recordConsumer) throws InterruptedException {
@@ -422,13 +432,15 @@ public class RecordsStreamProducer extends RecordsProducer {
         List<String> columnNames = table.columnNames();
         // JSON does not deliver a list of all columns for REPLICA IDENTITY DEFAULT
         Object[] values = new Object[columns.size() < columnNames.size() ? columnNames.size() : columns.size()];
-        columns.forEach(message -> {
+
+        for (ReplicationMessage.Column column : columns) {
             //DBZ-298 Quoted column names will be sent like that in messages, but stored unquoted in the column names
-            String columnName = Strings.unquoteIdentifierPart(message.getName());
+            String columnName = Strings.unquoteIdentifierPart(column.getName());
             int position = columnNames.indexOf(columnName);
             assert position >= 0;
-            values[position] = message.getValue(this::typeResolverConnection, taskContext.config().includeUnknownDatatypes());
-        });
+            values[position] = column.getValue(this::typeResolverConnection, taskContext.config().includeUnknownDatatypes());
+        }
+
         return values;
     }
 
@@ -465,7 +477,7 @@ public class RecordsStreamProducer extends RecordsProducer {
                                     incomingLength);
                         return true;
                     }
-                    final int localScale = column.scale();
+                    final int localScale = column.scale().get();
                     final int incomingScale = message.getTypeMetadata().getScale();
                     if (localScale != incomingScale) {
                         logger.info("detected new scale for column '{}', old scale was {}, new scale is {}; refreshing table schema", columnName, localScale,

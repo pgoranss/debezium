@@ -25,6 +25,7 @@ import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.relational.TableSchema;
 import io.debezium.relational.history.HistoryRecord.Fields;
+import io.debezium.schema.TopicSelector;
 import io.debezium.util.SchemaNameAdjuster;
 
 /**
@@ -37,7 +38,7 @@ public class RecordMakers {
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final MySqlSchema schema;
     private final SourceInfo source;
-    private final TopicSelector topicSelector;
+    private final TopicSelector<TableId> topicSelector;
     private final boolean emitTombstoneOnDelete;
     private final Map<Long, Converter> convertersByTableNumber = new HashMap<>();
     private final Map<TableId, Long> tableNumbersByTableId = new HashMap<>();
@@ -53,7 +54,7 @@ public class RecordMakers {
      * @param source the connector's source information; may not be null
      * @param topicSelector the selector for topic names; may not be null
      */
-    public RecordMakers(MySqlSchema schema, SourceInfo source, TopicSelector topicSelector, boolean emitTombstoneOnDelete) {
+    public RecordMakers(MySqlSchema schema, SourceInfo source, TopicSelector<TableId> topicSelector, boolean emitTombstoneOnDelete) {
         this.schema = schema;
         this.source = source;
         this.topicSelector = topicSelector;
@@ -152,7 +153,7 @@ public class RecordMakers {
     public void regenerate() {
         clear();
         AtomicInteger nextTableNumber = new AtomicInteger(0);
-        Set<TableId> tableIds = schema.tables().tableIds();
+        Set<TableId> tableIds = schema.tableIds();
         logger.debug("Regenerating converters for {} tables", tableIds.size());
         tableIds.forEach(id -> {
             assign(nextTableNumber.incrementAndGet(), id);
@@ -177,7 +178,7 @@ public class RecordMakers {
         TableSchema tableSchema = schema.schemaFor(id);
         if (tableSchema == null) return false;
 
-        String topicName = topicSelector.getTopic(id);
+        String topicName = topicSelector.topicNameFor(id);
         Envelope envelope = tableSchema.getEnvelopeSchema();
 
         // Generate this table's insert, update, and delete converters ...

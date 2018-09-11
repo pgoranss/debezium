@@ -7,6 +7,7 @@ package io.debezium.connector.postgresql;
 
 import static org.fest.assertions.Assertions.assertThat;
 
+import io.debezium.relational.TableId;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -22,7 +23,8 @@ public class SourceInfoTest {
 
     @Before
     public void beforeEach() {
-        source = new SourceInfo("serverX");
+        source = new SourceInfo("serverX", "databaseX");
+        source.update(1L, new TableId("catalogNameX", "schemaNameX", "tableNameX"));
     }
 
     @Test

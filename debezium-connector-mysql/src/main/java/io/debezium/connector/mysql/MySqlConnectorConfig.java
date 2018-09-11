@@ -7,7 +7,6 @@ package io.debezium.connector.mysql;
 
 import java.math.BigDecimal;
 import java.time.Duration;
-import java.util.Objects;
 import java.util.Random;
 
 import org.apache.kafka.common.config.ConfigDef;
@@ -20,10 +19,14 @@ import io.debezium.config.Configuration;
 import io.debezium.config.EnumeratedValue;
 import io.debezium.config.Field;
 import io.debezium.config.Field.ValidationOutput;
+import io.debezium.connector.mysql.antlr.MySqlAntlrDdlParser;
 import io.debezium.heartbeat.Heartbeat;
+import io.debezium.jdbc.JdbcValueConverters;
 import io.debezium.jdbc.JdbcValueConverters.BigIntUnsignedMode;
 import io.debezium.jdbc.JdbcValueConverters.DecimalMode;
 import io.debezium.jdbc.TemporalPrecisionMode;
+import io.debezium.relational.Tables.TableFilter;
+import io.debezium.relational.ddl.DdlParser;
 import io.debezium.relational.history.DatabaseHistory;
 import io.debezium.relational.history.KafkaDatabaseHistory;
 
@@ -452,6 +455,65 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
         }
     }
 
+    public static enum DdlParsingMode implements EnumeratedValue {
+
+        LEGACY("legacy") {
+            @Override
+            public DdlParser getNewParserInstance(JdbcValueConverters valueConverters, TableFilter tableFilter) {
+                return new MySqlDdlParser(false, (MySqlValueConverters) valueConverters);
+            }
+        },
+        ANTLR("antlr") {
+            @Override
+            public DdlParser getNewParserInstance(JdbcValueConverters valueConverters, TableFilter tableFilter) {
+                return new MySqlAntlrDdlParser((MySqlValueConverters) valueConverters, tableFilter);
+            }
+        };
+
+        private final String value;
+
+        private DdlParsingMode(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public String getValue() {
+            return value;
+        }
+
+        public abstract DdlParser getNewParserInstance(JdbcValueConverters valueConverters, TableFilter tableFilter);
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @return the matching option, or null if no match is found
+         */
+        public static DdlParsingMode parse(String value) {
+            if (value == null) return null;
+            value = value.trim();
+            for (DdlParsingMode option : DdlParsingMode.values()) {
+                if (option.getValue().equalsIgnoreCase(value)) return option;
+            }
+            return null;
+        }
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @param defaultValue the default value; may be null
+         * @return the matching option, or null if no match is found and the non-null default is invalid
+         */
+        public static DdlParsingMode parse(String value, String defaultValue) {
+            DdlParsingMode mode = parse(value);
+            if (mode == null && defaultValue != null) {
+                mode = parse(defaultValue);
+            }
+            return mode;
+        }
+    }
+
     private static final String DATABASE_WHITELIST_NAME = "database.whitelist";
     private static final String TABLE_WHITELIST_NAME = "table.whitelist";
     private static final String TABLE_IGNORE_BUILTIN_NAME = "table.ignore.builtin";
@@ -494,7 +556,6 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                               .withType(Type.PASSWORD)
                                               .withWidth(Width.SHORT)
                                               .withImportance(Importance.HIGH)
-                                              .withValidation(Field::isRequired)
                                               .withDescription("Password of the MySQL database user to be used when connecting to the database.");
 
     public static final Field SERVER_NAME = Field.create("database.server.name")
@@ -513,9 +574,9 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                            .withType(Type.STRING)
                                                            .withWidth(Width.LONG)
                                                            .withImportance(Importance.LOW)
-                                                           .withDescription("A semicolon separated list of SQL statements to be executed when JDBC connection (not binlog reading connection) to the database is established. "
-                                                                   + "Typically used for configuration of session parameters. "
-                                                                   + "Use doubled semicolon ';;' to use it as a character not as a delimiter");
+                                                           .withDescription("A semicolon separated list of SQL statements to be executed when a JDBC connection (not binlog reading connection) to the database is established. "
+                                                                   + "Note that the connector may establish JDBC connections at its own discretion, so this should typically be used for configuration of session parameters only,"
+                                                                   + "but not for executing DML statements. Use doubled semicolon (';;') to use a semicolon as a character and not as a delimiter.");
 
     public static final Field SERVER_ID = Field.create("database.server.id")
                                                .withDisplayName("Cluster ID")
@@ -586,7 +647,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                 .withDisplayName("Jdbc Driver Class Name")
                                                 .withType(Type.CLASS)
                                                 .withWidth(Width.MEDIUM)
-                                                .withDefault(com.mysql.jdbc.Driver.class.getName())
+                                                .withDefault(com.mysql.cj.jdbc.Driver.class.getName())
                                                 .withImportance(Importance.LOW)
                                                 .withValidation(Field::isClassName)
                                                 .withDescription("JDBC Driver class name used to connect to the MySQL database server.");
@@ -777,6 +838,17 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                                     + "The default is 'true'. This is independent of how the connector internally records database history.")
                                                             .withDefault(true);
 
+    public static final Field INCLUDE_SQL_QUERY = Field.create("include.query")
+        .withDisplayName("Include original SQL query with in change events")
+        .withType(Type.BOOLEAN)
+        .withWidth(Width.SHORT)
+        .withImportance(Importance.MEDIUM)
+        .withDescription("Whether the connector should include the original SQL query that generated the change event. "
+            + "Note: This option requires MySQL be configured with the binlog_rows_query_log_events option set to ON. Query will not be present for events generated from snapshot. "
+            + "WARNING: Enabling this option may expose tables or fields explicitly blacklisted or masked by including the original SQL statement in the change event. "
+            + "For this reason the default value is 'false'.")
+        .withDefault(false);
+
     public static final Field SNAPSHOT_MODE = Field.create("snapshot.mode")
                                                    .withDisplayName("Snapshot mode")
                                                    .withEnum(SnapshotMode.class, SnapshotMode.INITIAL)
@@ -883,6 +955,26 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                     "The value of those properties is the select statement to use when retrieving data from the specific table during snapshotting. " +
                     "A possible use case for large append-only tables is setting a specific point where to start (resume) snapshotting, in case a previous snapshotting was interrupted.");
 
+    public static final Field SNAPSHOT_DELAY_MS = Field.create("snapshot.delay.ms")
+            .withDisplayName("Snapshot Delay (milliseconds)")
+            .withType(Type.LONG)
+            .withWidth(Width.MEDIUM)
+            .withImportance(Importance.LOW)
+            .withDescription("The number of milliseconds to delay before a snapshot will begin.")
+            .withDefault(0L)
+            .withValidation(Field::isNonNegativeLong);
+
+    public static final Field DDL_PARSER_MODE = Field.create("ddl.parser.mode")
+            .withDisplayName("DDL parser mode")
+            .withEnum(DdlParsingMode.class, DdlParsingMode.LEGACY)
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("MySQL DDL statements can be parsed in different ways:" +
+                    "'legacy' (the default) parsing is creating a TokenStream and comparing token by token with an expected values." +
+                    "The decisions are made by matched token values." +
+                    "'antlr' uses generated parser from MySQL grammar using ANTLR v4 tool which use ALL(*) algorithm for parsing." +
+                    "This parser creates a parsing tree for DDL statement, then walks trough it and apply changes by node types in parsed tree.");
+
     /**
      * Method that generates a Field for specifying that string columns whose names match a set of regular expressions should
      * have their values truncated to be no longer than the specified number of characters.
@@ -924,7 +1016,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                      CommonConnectorConfig.MAX_BATCH_SIZE,
                                                      CommonConnectorConfig.POLL_INTERVAL_MS,
                                                      BUFFER_SIZE_FOR_BINLOG_READER, Heartbeat.HEARTBEAT_INTERVAL,
-                                                     Heartbeat.HEARTBEAT_TOPICS_PREFIX, DATABASE_HISTORY, INCLUDE_SCHEMA_CHANGES,
+                                                     Heartbeat.HEARTBEAT_TOPICS_PREFIX, DATABASE_HISTORY, INCLUDE_SCHEMA_CHANGES, INCLUDE_SQL_QUERY,
                                                      TABLE_WHITELIST, TABLE_BLACKLIST, TABLES_IGNORE_BUILTIN,
                                                      DATABASE_WHITELIST, DATABASE_BLACKLIST,
                                                      COLUMN_BLACKLIST, SNAPSHOT_MODE, SNAPSHOT_MINIMAL_LOCKING, SNAPSHOT_LOCKING_MODE,
@@ -936,6 +1028,8 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                      BIGINT_UNSIGNED_HANDLING_MODE,
                                                      EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE,
                                                      INCONSISTENT_SCHEMA_HANDLING_MODE,
+                                                     SNAPSHOT_DELAY_MS,
+                                                     DDL_PARSER_MODE,
                                                      CommonConnectorConfig.TOMBSTONES_ON_DELETE);
 
     /**
@@ -953,9 +1047,10 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                                                                 DatabaseHistory.DDL_FILTER);
 
     private final SnapshotLockingMode snapshotLockingMode;
+    private final DdlParsingMode ddlParsingMode;
 
     public MySqlConnectorConfig(Configuration config) {
-        super(config);
+        super(config, config.getString(SERVER_NAME));
 
         // If deprecated snapshot.minimal.locking property is explicitly configured
         if (config.hasKey(MySqlConnectorConfig.SNAPSHOT_MINIMAL_LOCKING.name())) {
@@ -969,10 +1064,17 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
             // Otherwise use configured snapshot.locking.mode configuration.
             this.snapshotLockingMode = SnapshotLockingMode.parse(config.getString(SNAPSHOT_LOCKING_MODE), SNAPSHOT_LOCKING_MODE.defaultValueAsString());
         }
+
+        String ddlParsingModeStr = config.getString(MySqlConnectorConfig.DDL_PARSER_MODE);
+        this.ddlParsingMode = DdlParsingMode.parse(ddlParsingModeStr, MySqlConnectorConfig.DDL_PARSER_MODE.defaultValueAsString());
     }
 
     public SnapshotLockingMode getSnapshotLockingMode() {
         return this.snapshotLockingMode;
+    }
+
+    public DdlParsingMode getDdlParsingMode() {
+        return ddlParsingMode;
     }
 
     protected static ConfigDef configDef() {
@@ -984,7 +1086,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
                     KafkaDatabaseHistory.RECOVERY_POLL_INTERVAL_MS, DATABASE_HISTORY,
                     DatabaseHistory.SKIP_UNPARSEABLE_DDL_STATEMENTS, DatabaseHistory.DDL_FILTER,
                     DatabaseHistory.STORE_ONLY_MONITORED_TABLES_DDL);
-        Field.group(config, "Events", INCLUDE_SCHEMA_CHANGES, TABLES_IGNORE_BUILTIN, DATABASE_WHITELIST, TABLE_WHITELIST,
+        Field.group(config, "Events", INCLUDE_SCHEMA_CHANGES, INCLUDE_SQL_QUERY, TABLES_IGNORE_BUILTIN, DATABASE_WHITELIST, TABLE_WHITELIST,
                     COLUMN_BLACKLIST, TABLE_BLACKLIST, DATABASE_BLACKLIST,
                     GTID_SOURCE_INCLUDES, GTID_SOURCE_EXCLUDES, GTID_SOURCE_FILTER_DML_EVENTS, BUFFER_SIZE_FOR_BINLOG_READER,
                     Heartbeat.HEARTBEAT_INTERVAL, Heartbeat.HEARTBEAT_TOPICS_PREFIX, EVENT_DESERIALIZATION_FAILURE_HANDLING_MODE, INCONSISTENT_SCHEMA_HANDLING_MODE,
@@ -992,7 +1094,7 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
         Field.group(config, "Connector", CONNECTION_TIMEOUT_MS, KEEP_ALIVE, KEEP_ALIVE_INTERVAL_MS, CommonConnectorConfig.MAX_QUEUE_SIZE,
                     CommonConnectorConfig.MAX_BATCH_SIZE, CommonConnectorConfig.POLL_INTERVAL_MS,
                     SNAPSHOT_MODE, SNAPSHOT_LOCKING_MODE, SNAPSHOT_MINIMAL_LOCKING, TIME_PRECISION_MODE, DECIMAL_HANDLING_MODE,
-                    BIGINT_UNSIGNED_HANDLING_MODE);
+                    BIGINT_UNSIGNED_HANDLING_MODE, SNAPSHOT_DELAY_MS, DDL_PARSER_MODE);
         return config;
     }
 
@@ -1023,18 +1125,6 @@ public class MySqlConnectorConfig extends CommonConnectorConfig {
             problems.accept(GTID_SOURCE_EXCLUDES, excludes, "Included GTID source UUIDs are already specified");
             return 1;
         }
-        return 0;
-    }
-
-    private static int validateServerNameIsDifferentFromHistoryTopicName(Configuration config, Field field, ValidationOutput problems) {
-        String serverName = config.getString(MySqlConnectorConfig.SERVER_NAME);
-        String historyTopicName = config.getString(KafkaDatabaseHistory.TOPIC);
-
-        if (Objects.equals(serverName, historyTopicName)) {
-            problems.accept(SERVER_NAME, serverName, "Must not have the same value as " + KafkaDatabaseHistory.TOPIC.name());
-            return 1;
-        }
-
         return 0;
     }
 

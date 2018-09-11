@@ -5,12 +5,13 @@
  */
 package io.debezium.connector.mysql;
 
+import static org.fest.assertions.Assertions.assertThat;
+import static org.junit.Assert.assertFalse;
+
 import java.sql.SQLException;
 import java.sql.Types;
 
 import org.junit.Test;
-
-import static org.fest.assertions.Assertions.assertThat;
 
 import io.debezium.relational.Column;
 import io.debezium.relational.Table;
@@ -35,7 +36,7 @@ public class MetadataIT implements Testing {
             conn.execute("DROP TABLE IF EXISTS person",
                          "DROP TABLE IF EXISTS product",
                          "DROP TABLE IF EXISTS purchased");
-            
+
             conn.execute("CREATE TABLE person ("
                                  + "  name VARCHAR(255) primary key,"
                                  + "  birthdate DATE NULL,"
@@ -57,7 +58,7 @@ public class MetadataIT implements Testing {
             assertThat(person.columnWithName("name").typeName()).isEqualTo("VARCHAR");
             assertThat(person.columnWithName("name").jdbcType()).isEqualTo(Types.VARCHAR);
             assertThat(person.columnWithName("name").length()).isEqualTo(255);
-            assertThat(person.columnWithName("name").scale()).isEqualTo(0);
+            assertFalse(person.columnWithName("name").scale().isPresent());
             assertThat(person.columnWithName("name").position()).isEqualTo(1);
             assertThat(person.columnWithName("name").isAutoIncremented()).isFalse();
             assertThat(person.columnWithName("name").isGenerated()).isFalse();
@@ -66,7 +67,7 @@ public class MetadataIT implements Testing {
             assertThat(person.columnWithName("birthdate").typeName()).isEqualTo("DATE");
             assertThat(person.columnWithName("birthdate").jdbcType()).isEqualTo(Types.DATE);
             assertThat(person.columnWithName("birthdate").length()).isEqualTo(10);
-            assertThat(person.columnWithName("birthdate").scale()).isEqualTo(0);
+            assertFalse(person.columnWithName("birthdate").scale().isPresent());
             assertThat(person.columnWithName("birthdate").position()).isEqualTo(2);
             assertThat(person.columnWithName("birthdate").isAutoIncremented()).isFalse();
             assertThat(person.columnWithName("birthdate").isGenerated()).isFalse();
@@ -75,7 +76,9 @@ public class MetadataIT implements Testing {
             assertThat(person.columnWithName("age").typeName()).isEqualTo("INT");
             assertThat(person.columnWithName("age").jdbcType()).isEqualTo(Types.INTEGER);
             assertThat(person.columnWithName("age").length()).isEqualTo(10);
-            assertThat(person.columnWithName("age").scale()).isEqualTo(0);
+
+            // DBZ-763: this used to be 0 as of MySQL Connector/J 5.x
+            assertThat(!person.columnWithName("age").scale().isPresent());
             assertThat(person.columnWithName("age").position()).isEqualTo(3);
             assertThat(person.columnWithName("age").isAutoIncremented()).isFalse();
             assertThat(person.columnWithName("age").isGenerated()).isFalse();
@@ -84,7 +87,7 @@ public class MetadataIT implements Testing {
             assertThat(person.columnWithName("salary").typeName()).isEqualTo("DECIMAL");
             assertThat(person.columnWithName("salary").jdbcType()).isEqualTo(Types.DECIMAL);
             assertThat(person.columnWithName("salary").length()).isEqualTo(5);
-            assertThat(person.columnWithName("salary").scale()).isEqualTo(2);
+            assertThat(person.columnWithName("salary").scale().get()).isEqualTo(2);
             assertThat(person.columnWithName("salary").position()).isEqualTo(4);
             assertThat(person.columnWithName("salary").isAutoIncremented()).isFalse();
             assertThat(person.columnWithName("salary").isGenerated()).isFalse();
@@ -93,12 +96,12 @@ public class MetadataIT implements Testing {
             assertThat(person.columnWithName("bitStr").typeName()).isEqualTo("BIT");
             assertThat(person.columnWithName("bitStr").jdbcType()).isEqualTo(Types.BIT);
             assertThat(person.columnWithName("bitStr").length()).isEqualTo(18);
-            assertThat(person.columnWithName("bitStr").scale()).isEqualTo(0);
+            assertFalse(person.columnWithName("bitStr").scale().isPresent());
             assertThat(person.columnWithName("bitStr").position()).isEqualTo(5);
             assertThat(person.columnWithName("bitStr").isAutoIncremented()).isFalse();
             assertThat(person.columnWithName("bitStr").isGenerated()).isFalse();
             assertThat(person.columnWithName("bitStr").isOptional()).isTrue();
-            
+
             conn.execute("CREATE TABLE product ("
                                  + "  id INT NOT NULL AUTO_INCREMENT,"
                                  + "  createdByDate DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
@@ -119,7 +122,8 @@ public class MetadataIT implements Testing {
             assertThat(product.columnWithName("id").typeName()).isEqualTo("INT");
             assertThat(product.columnWithName("id").jdbcType()).isEqualTo(Types.INTEGER);
             assertThat(product.columnWithName("id").length()).isEqualTo(10);
-            assertThat(product.columnWithName("id").scale()).isEqualTo(0);
+            assertThat(!product.columnWithName("id").scale().isPresent()
+                    || product.columnWithName("id").scale().get() == 0);
             assertThat(product.columnWithName("id").position()).isEqualTo(1);
             assertThat(product.columnWithName("id").isAutoIncremented()).isTrue();
             assertThat(product.columnWithName("id").isGenerated()).isFalse();
@@ -127,8 +131,8 @@ public class MetadataIT implements Testing {
             assertThat(product.columnWithName("createdByDate").name()).isEqualTo("createdByDate");
             assertThat(product.columnWithName("createdByDate").typeName()).isEqualTo("DATETIME");
             assertThat(product.columnWithName("createdByDate").jdbcType()).isEqualTo(Types.TIMESTAMP);
-            assertThat(product.columnWithName("createdByDate").length()).isEqualTo(19);
-            assertThat(product.columnWithName("createdByDate").scale()).isEqualTo(0);
+            assertThat(product.columnWithName("createdByDate").length()).isEqualTo(26);
+            assertFalse(product.columnWithName("createdByDate").scale().isPresent());
             assertThat(product.columnWithName("createdByDate").position()).isEqualTo(2);
             assertThat(product.columnWithName("createdByDate").isAutoIncremented()).isFalse();
             assertThat(product.columnWithName("createdByDate").isGenerated()).isFalse();
@@ -136,13 +140,13 @@ public class MetadataIT implements Testing {
             assertThat(product.columnWithName("modifiedDate").name()).isEqualTo("modifiedDate");
             assertThat(product.columnWithName("modifiedDate").typeName()).isEqualTo("DATETIME");
             assertThat(product.columnWithName("modifiedDate").jdbcType()).isEqualTo(Types.TIMESTAMP);
-            assertThat(product.columnWithName("modifiedDate").length()).isEqualTo(19);
-            assertThat(product.columnWithName("modifiedDate").scale()).isEqualTo(0);
+            assertThat(product.columnWithName("modifiedDate").length()).isEqualTo(26);
+            assertFalse(product.columnWithName("modifiedDate").scale().isPresent());
             assertThat(product.columnWithName("modifiedDate").position()).isEqualTo(3);
             assertThat(product.columnWithName("modifiedDate").isAutoIncremented()).isFalse();
             assertThat(product.columnWithName("modifiedDate").isGenerated()).isFalse();
             assertThat(product.columnWithName("modifiedDate").isOptional()).isFalse();
-            
+
             conn.execute("CREATE TABLE purchased ("
                                  + "  purchaser VARCHAR(255) NOT NULL,"
                                  + "  productId INT NOT NULL,"
@@ -163,7 +167,7 @@ public class MetadataIT implements Testing {
             assertThat(purchased.columnWithName("purchaser").typeName()).isEqualTo("VARCHAR");
             assertThat(purchased.columnWithName("purchaser").jdbcType()).isEqualTo(Types.VARCHAR);
             assertThat(purchased.columnWithName("purchaser").length()).isEqualTo(255);
-            assertThat(purchased.columnWithName("purchaser").scale()).isEqualTo(0);
+            assertFalse(purchased.columnWithName("purchaser").scale().isPresent());
             assertThat(purchased.columnWithName("purchaser").position()).isEqualTo(1);
             assertThat(purchased.columnWithName("purchaser").isAutoIncremented()).isFalse();
             assertThat(purchased.columnWithName("purchaser").isGenerated()).isFalse();
@@ -172,7 +176,9 @@ public class MetadataIT implements Testing {
             assertThat(purchased.columnWithName("productId").typeName()).isEqualTo("INT");
             assertThat(purchased.columnWithName("productId").jdbcType()).isEqualTo(Types.INTEGER);
             assertThat(purchased.columnWithName("productId").length()).isEqualTo(10);
-            assertThat(purchased.columnWithName("productId").scale()).isEqualTo(0);
+
+            // DBZ-763: this used to be 0 as of MySQL Connector/J 5.x
+            assertThat(!purchased.columnWithName("productId").scale().isPresent());
             assertThat(purchased.columnWithName("productId").position()).isEqualTo(2);
             assertThat(purchased.columnWithName("productId").isAutoIncremented()).isFalse();
             assertThat(purchased.columnWithName("productId").isGenerated()).isFalse();
@@ -180,8 +186,8 @@ public class MetadataIT implements Testing {
             assertThat(purchased.columnWithName("purchaseDate").name()).isEqualTo("purchaseDate");
             assertThat(purchased.columnWithName("purchaseDate").typeName()).isEqualTo("DATETIME");
             assertThat(purchased.columnWithName("purchaseDate").jdbcType()).isEqualTo(Types.TIMESTAMP);
-            assertThat(purchased.columnWithName("purchaseDate").length()).isEqualTo(19);
-            assertThat(purchased.columnWithName("purchaseDate").scale()).isEqualTo(0);
+            assertThat(purchased.columnWithName("purchaseDate").length()).isEqualTo(26);
+            assertFalse(purchased.columnWithName("purchaseDate").scale().isPresent());
             assertThat(purchased.columnWithName("purchaseDate").position()).isEqualTo(3);
             assertThat(purchased.columnWithName("purchaseDate").isAutoIncremented()).isFalse();
             assertThat(purchased.columnWithName("purchaseDate").isGenerated()).isFalse();

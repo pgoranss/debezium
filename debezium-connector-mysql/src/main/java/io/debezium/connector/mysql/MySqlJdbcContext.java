@@ -19,6 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.config.Configuration;
+import io.debezium.config.Configuration.Builder;
 import io.debezium.config.Field;
 import io.debezium.connector.mysql.MySqlConnectorConfig.EventProcessingFailureHandlingMode;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SecureConnectionMode;
@@ -34,7 +35,11 @@ import io.debezium.util.Strings;
  */
 public class MySqlJdbcContext implements AutoCloseable {
 
-    protected static final String MYSQL_CONNECTION_URL = "jdbc:mysql://${hostname}:${port}/?useInformationSchema=true&nullCatalogMeansCurrent=false&useSSL=${useSSL}&useUnicode=true&characterEncoding=UTF-8&characterSetResults=UTF-8&zeroDateTimeBehavior=convertToNull";
+    protected static final String MYSQL_CONNECTION_URL = "jdbc:mysql://${hostname}:${port}/?useInformationSchema=true&nullCatalogMeansCurrent=false&useSSL=${useSSL}&useUnicode=true&characterEncoding=UTF-8&characterSetResults=UTF-8&zeroDateTimeBehavior=CONVERT_TO_NULL";
+    protected static final String JDBC_PROPERTY_LEGACY_DATETIME = "useLegacyDatetimeCode";
+    private static final String SQL_SHOW_SYSTEM_VARIABLES = "SHOW VARIABLES";
+    private static final String SQL_SHOW_SYSTEM_VARIABLES_CHARACTER_SET = "SHOW VARIABLES WHERE Variable_name IN ('character_set_server','collation_server')";
+
     protected static ConnectionFactory FACTORY = JdbcConnection.patternBasedFactory(MYSQL_CONNECTION_URL);
 
     protected final Logger logger = LoggerFactory.getLogger(getClass());
@@ -49,11 +54,23 @@ public class MySqlJdbcContext implements AutoCloseable {
         // to give us better JDBC database metadata behavior, including using UTF-8 for the client-side character encoding
         // per https://dev.mysql.com/doc/connector-j/5.1/en/connector-j-reference-charsets.html
         boolean useSSL = sslModeEnabled();
-        Configuration jdbcConfig = config.filter(x -> !(x.startsWith(DatabaseHistory.CONFIGURATION_FIELD_PREFIX_STRING) || x.equals(MySqlConnectorConfig.DATABASE_HISTORY.name())))
-                                         .subset("database.", true)
-                                         .edit()
-                                         .with("useSSL", Boolean.toString(useSSL))
-                                         .build();
+        Configuration jdbcConfig = config
+                .filter(x -> !(x.startsWith(DatabaseHistory.CONFIGURATION_FIELD_PREFIX_STRING) || x.equals(MySqlConnectorConfig.DATABASE_HISTORY.name())))
+                .subset("database.", true);
+
+        Builder jdbcConfigBuilder = jdbcConfig
+                                     .edit()
+                                     .with("useSSL", Boolean.toString(useSSL));
+
+        final String legacyDateTime = jdbcConfig.getString(JDBC_PROPERTY_LEGACY_DATETIME);
+        if (legacyDateTime == null) {
+            jdbcConfigBuilder.with(JDBC_PROPERTY_LEGACY_DATETIME, "false");
+        }
+        else if ("true".equals(legacyDateTime)) {
+            logger.warn("'" + JDBC_PROPERTY_LEGACY_DATETIME + "'" + " is set to 'true'. This setting is not recommended and can result in timezone issues.");
+        }
+
+        jdbcConfig = jdbcConfigBuilder.build();
         String driverClassName = jdbcConfig.getString(MySqlConnectorConfig.JDBC_DRIVER);
         this.jdbc = new JdbcConnection(jdbcConfig,
                 JdbcConnection.patternBasedFactory(MYSQL_CONNECTION_URL, driverClassName, getClass().getClassLoader()));
@@ -194,47 +211,28 @@ public class MySqlJdbcContext implements AutoCloseable {
     /**
      * Read the MySQL charset-related system variables.
      *
-     * @param sql the reference that should be set to the SQL statement; may be null if not needed
      * @return the system variables that are related to server character sets; never null
      */
-    protected Map<String, String> readMySqlCharsetSystemVariables(AtomicReference<String> sql) {
+    protected Map<String, String> readMySqlCharsetSystemVariables() {
         // Read the system variables from the MySQL instance and get the current database name ...
-        Map<String, String> variables = new HashMap<>();
-        try (JdbcConnection mysql = jdbc.connect()) {
-            logger.debug("Reading MySQL charset-related system variables before parsing DDL history.");
-            String statement = "SHOW VARIABLES WHERE Variable_name IN ('character_set_server','collation_server')";
-            if (sql != null) sql.set(statement);
-            mysql.query(statement, rs -> {
-                while (rs.next()) {
-                    String varName = rs.getString(1);
-                    String value = rs.getString(2);
-                    if (varName != null && value != null) {
-                        variables.put(varName, value);
-                        logger.debug("\t{} = {}",
-                                     Strings.pad(varName, 45, ' '),
-                                     Strings.pad(value, 45, ' '));
-                    }
-                }
-            });
-        } catch (SQLException e) {
-            throw new ConnectException("Error reading MySQL variables: " + e.getMessage(), e);
-        }
-        return variables;
+        logger.debug("Reading MySQL charset-related system variables before parsing DDL history.");
+        return querySystemVariables(SQL_SHOW_SYSTEM_VARIABLES_CHARACTER_SET);
     }
 
     /**
      * Read the MySQL system variables.
      *
-     * @param sql the reference that should be set to the SQL statement; may be null if not needed
      * @return the system variables that are related to server character sets; never null
      */
-    protected Map<String, String> readMySqlSystemVariables(AtomicReference<String> sql) {
+    protected Map<String, String> readMySqlSystemVariables() {
         // Read the system variables from the MySQL instance and get the current database name ...
+        logger.debug("Reading MySQL system variables");
+        return querySystemVariables(SQL_SHOW_SYSTEM_VARIABLES);
+    }
+
+    private Map<String, String> querySystemVariables(String statement) {
         Map<String, String> variables = new HashMap<>();
         try (JdbcConnection mysql = jdbc.connect()) {
-            logger.debug("Reading MySQL system variables");
-            String statement = "SHOW VARIABLES";
-            if (sql != null) sql.set(statement);
             mysql.query(statement, rs -> {
                 while (rs.next()) {
                     String varName = rs.getString(1);
@@ -250,6 +248,7 @@ public class MySqlJdbcContext implements AutoCloseable {
         } catch (SQLException e) {
             throw new ConnectException("Error reading MySQL variables: " + e.getMessage(), e);
         }
+
         return variables;
     }
 

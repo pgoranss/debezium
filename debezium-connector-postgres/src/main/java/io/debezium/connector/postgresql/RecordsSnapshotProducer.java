@@ -35,6 +35,7 @@ import io.debezium.connector.postgresql.connection.ReplicationConnection;
 import io.debezium.data.Envelope;
 import io.debezium.data.SpecialValueDecimal;
 import io.debezium.function.BlockingConsumer;
+import io.debezium.heartbeat.Heartbeat;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.relational.TableSchema;
@@ -62,7 +63,7 @@ public class RecordsSnapshotProducer extends RecordsProducer {
                                    SourceInfo sourceInfo,
                                    boolean continueStreamingAfterCompletion) {
         super(taskContext, sourceInfo);
-        executorService = Threads.newSingleThreadExecutor(PostgresConnector.class, taskContext.config().serverName(), CONTEXT_NAME);
+        executorService = Threads.newSingleThreadExecutor(PostgresConnector.class, taskContext.config().getLogicalName(), CONTEXT_NAME);
         currentRecord = new AtomicReference<>();
         if (continueStreamingAfterCompletion) {
             // we need to create the stream producer here to make sure it creates the replication connection;
@@ -154,7 +155,7 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             // we're locking in SHARE UPDATE EXCLUSIVE MODE to avoid concurrent schema changes while we're taking the snapshot
             // this does not prevent writes to the table, but prevents changes to the table's schema....
             // DBZ-298 Quoting name in case it has been quoted originally; it doesn't do harm if it hasn't been quoted
-            schema.tables().forEach(tableId -> statements.append("LOCK TABLE ")
+            schema.tableIds().forEach(tableId -> statements.append("LOCK TABLE ")
                                                          .append(tableId.toDoubleQuotedString())
                                                          .append(" IN SHARE UPDATE EXCLUSIVE MODE;")
                                                          .append(lineSeparator));
@@ -172,18 +173,13 @@ public class RecordsSnapshotProducer extends RecordsProducer {
 
             // and mark the start of the snapshot
             sourceInfo.startSnapshot();
-            sourceInfo.update(xlogStart, clock().currentTimeInMicros(), txId);
+            sourceInfo.update(xlogStart, clock().currentTimeInMicros(), txId, null);
 
             logger.info("Step 3: reading and exporting the contents of each table");
             AtomicInteger rowsCounter = new AtomicInteger(0);
             final Map<TableId, String> selectOverrides = getSnapshotSelectOverridesByTable();
 
-            for(TableId tableId : schema.tables()) {
-                if (schema.isFilteredOut(tableId)) {
-                    logger.info("\t table '{}' is filtered out, ignoring", tableId);
-                    continue;
-                }
-
+            for(TableId tableId : schema.tableIds()) {
                 long exportStart = clock().currentTimeInMillis();
                 logger.info("\t exporting data from table '{}'", tableId);
                 try {
@@ -222,6 +218,18 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             // and complete the snapshot
             sourceInfo.completeSnapshot();
             logger.info("Snapshot completed in '{}'", Strings.duration(clock().currentTimeInMillis() - snapshotStart));
+            Heartbeat
+                .create(
+                    taskContext.config().getConfig(),
+                    taskContext.topicSelector().getHeartbeatTopic(),
+                    taskContext.config().getLogicalName()
+                )
+                .forcedBeat(
+                    sourceInfo.partition(),
+                    sourceInfo.offset(),
+                    r -> consumer.accept(new ChangeEvent(r)
+                )
+            );
         }
         catch (SQLException e) {
             rollbackTransaction(jdbcConnection);
@@ -324,7 +332,7 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             return;
         }
         Schema keySchema = tableSchema.keySchema();
-        sourceInfo.update(clock().currentTimeInMicros());
+        sourceInfo.update(clock().currentTimeInMicros(), tableId);
         Map<String, ?> partition = sourceInfo.partition();
         Map<String, ?> offset = sourceInfo.offset();
         String topicName = topicSelector().topicNameFor(tableId);
