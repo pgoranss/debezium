@@ -369,7 +369,8 @@ tableConstraint
     | (CONSTRAINT name=uid?)? 
       FOREIGN KEY index=uid? indexColumnNames 
       referenceDefinition                                           #foreignKeyTableConstraint
-    | CHECK '(' expression ')'                                      #checkTableConstraint
+    | (CONSTRAINT name=uid?)?
+      CHECK '(' expression ')'                                      #checkTableConstraint
     ;
 
 referenceDefinition
@@ -601,6 +602,7 @@ alterSpecification
       indexColumnNames indexOption*                                 #alterByAddSpecialIndex
     | ADD (CONSTRAINT name=uid?)? FOREIGN KEY
       indexName=uid? indexColumnNames referenceDefinition           #alterByAddForeignKey
+    | ADD (CONSTRAINT name=uid?)? CHECK '(' expression ')'          #alterByAddCheckTableConstraint
     | ALGORITHM '='? algType=(DEFAULT | INPLACE | COPY)             #alterBySetAlgorithm
     | ALTER COLUMN? uid
       (SET DEFAULT defaultValue | DROP DEFAULT)                     #alterByChangeDefault
@@ -2421,7 +2423,7 @@ functionNameBase
     | COMPRESS | CONCAT | CONCAT_WS | CONNECTION_ID | CONV 
     | CONVERT_TZ | COS | COT | COUNT | CRC32 
     | CREATE_ASYMMETRIC_PRIV_KEY | CREATE_ASYMMETRIC_PUB_KEY 
-    | CREATE_DH_PARAMETERS | CREATE_DIGEST | CROSSES | DATE 
+    | CREATE_DH_PARAMETERS | CREATE_DIGEST | CROSSES | DATABASE | DATE 
     | DATEDIFF | DATE_FORMAT | DAY | DAYNAME | DAYOFMONTH 
     | DAYOFWEEK | DAYOFYEAR | DECODE | DEGREES | DES_DECRYPT 
     | DES_ENCRYPT | DIMENSION | DISJOINT | ELT | ENCODE 

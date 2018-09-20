@@ -28,9 +28,11 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
+import org.apache.kafka.connect.errors.ConnectException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.annotation.NotThreadSafe;
 import io.debezium.annotation.ThreadSafe;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
@@ -41,6 +43,9 @@ import io.debezium.relational.TableId;
 import io.debezium.relational.Tables;
 import io.debezium.relational.Tables.ColumnNameFilter;
 import io.debezium.relational.Tables.TableFilter;
+import io.debezium.util.BoundedConcurrentHashMap;
+import io.debezium.util.BoundedConcurrentHashMap.Eviction;
+import io.debezium.util.BoundedConcurrentHashMap.EvictionListener;
 import io.debezium.util.Collect;
 import io.debezium.util.Strings;
 
@@ -49,10 +54,23 @@ import io.debezium.util.Strings;
  *
  * @author Randall Hauch
  */
+@NotThreadSafe
 public class JdbcConnection implements AutoCloseable {
 
     private static final char STATEMENT_DELIMITER = ';';
+    private static final int STATEMENT_CACHE_CAPACITY = 10_000;
     private final static Logger LOGGER = LoggerFactory.getLogger(JdbcConnection.class);
+    private final Map<String, PreparedStatement> statementCache = new BoundedConcurrentHashMap<>(STATEMENT_CACHE_CAPACITY, 16, Eviction.LIRS, new EvictionListener<String, PreparedStatement>() {
+
+        @Override
+        public void onEntryEviction(Map<String, PreparedStatement> evicted) {
+        }
+
+        @Override
+        public void onEntryChosenForEviction(PreparedStatement statement) {
+            cleanupPreparedStatement(statement);
+        }
+    });
 
     /**
      * Establishes JDBC connections.
@@ -442,7 +460,7 @@ public class JdbcConnection implements AutoCloseable {
                 if (LOGGER.isTraceEnabled()) {
                     LOGGER.trace("running '{}'", query);
                 }
-                final PreparedStatement statement = conn.prepareStatement(query);
+                final PreparedStatement statement = createPreparedStatement(query);
                 preparedStatements[i] = statement;
                 preparer.accept(statement);
                 resultSets[i] = statement.executeQuery();
@@ -456,15 +474,6 @@ public class JdbcConnection implements AutoCloseable {
                 if (rs != null) {
                     try {
                         rs.close();
-                    }
-                    catch (Exception ei) {
-                    }
-                }
-            }
-            for (PreparedStatement ps: preparedStatements) {
-                if (ps != null) {
-                    try {
-                        ps.close();
                     }
                     catch (Exception ei) {
                     }
@@ -540,12 +549,10 @@ public class JdbcConnection implements AutoCloseable {
      */
     public JdbcConnection prepareQuery(String preparedQueryString, StatementPreparer preparer, ResultSetConsumer resultConsumer)
             throws SQLException {
-        Connection conn = connection();
-        try (PreparedStatement statement = conn.prepareStatement(preparedQueryString);) {
-            preparer.accept(statement);
-            try (ResultSet resultSet = statement.executeQuery();) {
-                if (resultConsumer != null) resultConsumer.accept(resultSet);
-            }
+        final PreparedStatement statement = createPreparedStatement(preparedQueryString);
+        preparer.accept(statement);
+        try (ResultSet resultSet = statement.executeQuery();) {
+            if (resultConsumer != null) resultConsumer.accept(resultSet);
         }
         return this;
     }
@@ -564,12 +571,10 @@ public class JdbcConnection implements AutoCloseable {
     public <T> T prepareQueryAndMap(String preparedQueryString, StatementPreparer preparer, ResultSetMapper<T> mapper)
             throws SQLException {
         Objects.requireNonNull(mapper, "Mapper must be provided");
-        Connection conn = connection();
-        try (PreparedStatement statement = conn.prepareStatement(preparedQueryString);) {
-            preparer.accept(statement);
-            try (ResultSet resultSet = statement.executeQuery();) {
-                return mapper.apply(resultSet);
-            }
+        final PreparedStatement statement = createPreparedStatement(preparedQueryString);
+        preparer.accept(statement);
+        try (ResultSet resultSet = statement.executeQuery();) {
+            return mapper.apply(resultSet);
         }
     }
 
@@ -583,13 +588,11 @@ public class JdbcConnection implements AutoCloseable {
      * @see #execute(Operations)
      */
     public JdbcConnection prepareUpdate(String stmt, StatementPreparer preparer) throws SQLException {
-        Connection conn = connection();
-        try (PreparedStatement statement = conn.prepareStatement(stmt);) {
-            if (preparer != null) {
-                preparer.accept(statement);
-            }
-            statement.execute();
+        final PreparedStatement statement = createPreparedStatement(stmt);
+        if (preparer != null) {
+            preparer.accept(statement);
         }
+        statement.execute();
         return this;
     }
 
@@ -606,16 +609,14 @@ public class JdbcConnection implements AutoCloseable {
     public JdbcConnection prepareQuery(String preparedQueryString, List<?> parameters,
                                        ParameterResultSetConsumer resultConsumer)
             throws SQLException {
-        Connection conn = connection();
-        try (PreparedStatement statement = conn.prepareStatement(preparedQueryString)) {
-            int index = 1;
-            for (final Object parameter: parameters) {
-                statement.setObject(index++, parameter);
-            }
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultConsumer != null) {
-                    resultConsumer.accept(parameters, resultSet);
-                }
+        final PreparedStatement statement = createPreparedStatement(preparedQueryString);
+        int index = 1;
+        for (final Object parameter: parameters) {
+            statement.setObject(index++, parameter);
+        }
+        try (ResultSet resultSet = statement.executeQuery()) {
+            if (resultConsumer != null) {
+                resultConsumer.accept(parameters, resultSet);
             }
         }
         return this;
@@ -747,6 +748,8 @@ public class JdbcConnection implements AutoCloseable {
     public synchronized void close() throws SQLException {
         if (conn != null) {
             try {
+                statementCache.values().forEach(this::cleanupPreparedStatement);
+                statementCache.clear();
                 conn.close();
             } finally {
                 conn = null;
@@ -995,21 +998,26 @@ public class JdbcConnection implements AutoCloseable {
         }
     }
 
-    /**
-     * Returns a map which contains information about how a database maps it's data types to JDBC data types.
-     *
-     * @return a {@link Map map of (localTypeName, jdbcType) pairs}
-     * @throws SQLException if anything unexpected fails
-     */
-    public Map<String, Integer> readTypeInfo() throws SQLException {
-        DatabaseMetaData metadata = connection().getMetaData();
-        Map<String, Integer> jdbcTypeByLocalTypeName = new HashMap<>();
-        try (ResultSet rs = metadata.getTypeInfo()) {
-           while (rs.next()) {
-               jdbcTypeByLocalTypeName.put(rs.getString("TYPE_NAME"), rs.getInt("DATA_TYPE"));
-           }
+    private void cleanupPreparedStatement(PreparedStatement statement) {
+        LOGGER.trace("Closing prepared statement '{}' removed from cache", statement);
+        try {
+            statement.close();
         }
-        return jdbcTypeByLocalTypeName;
+        catch (Exception e) {
+            LOGGER.info("Exception while closing a prepared statement removed from cache", e);
+        }
+    }
+
+    private PreparedStatement createPreparedStatement(String preparedQueryString) {
+        return statementCache.computeIfAbsent(preparedQueryString, query -> {
+            try {
+                LOGGER.trace("Inserting prepared statement '{}' removed from the cache", query);
+                return connection().prepareStatement(query);
+            }
+            catch (SQLException e) {
+                throw new ConnectException(e);
+            }
+        });
     }
 
     /**

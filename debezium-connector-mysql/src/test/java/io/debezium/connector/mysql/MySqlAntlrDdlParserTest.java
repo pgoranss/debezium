@@ -14,6 +14,7 @@ import java.util.List;
 import org.junit.Test;
 
 import io.debezium.connector.mysql.antlr.MySqlAntlrDdlParser;
+import io.debezium.doc.FixFor;
 import io.debezium.jdbc.JdbcValueConverters;
 import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.relational.Column;
@@ -269,6 +270,35 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(c2.typeName()).isEqualTo("SMALLINT");
         assertThat(c3.name()).isEqualTo("y");
         assertThat(c3.typeName()).isEqualTo("TINYINT");
+    }
+
+    @Test
+    @FixFor("DBZ-903")
+    public void shouldParseFunctionNamedDatabase() {
+        parser = new MysqlDdlParserWithSimpleTestListener(listener, TableFilter.fromPredicate(x -> !x.table().contains("ignored")));
+
+        final String ddl = "SELECT `table_name` FROM `information_schema`.`TABLES` WHERE `table_schema` = DATABASE()";
+        parser.parse(ddl, tables);
+    }
+
+    @Test
+    @FixFor("DBZ-910")
+    public void shouldParseConstraintCheck() {
+        parser = new MysqlDdlParserWithSimpleTestListener(listener, true);
+
+        final String ddl =
+                "CREATE TABLE t1 (c1 INTEGER NOT NULL,c2 VARCHAR(22),CHECK (c2 IN ('A', 'B', 'C')));"
+              + "CREATE TABLE t2 (c1 INTEGER NOT NULL,c2 VARCHAR(22),CONSTRAINT c1 CHECK (c2 IN ('A', 'B', 'C')));"
+              + "CREATE TABLE t3 (c1 INTEGER NOT NULL,c2 VARCHAR(22),CONSTRAINT CHECK (c2 IN ('A', 'B', 'C')));"
+              + "ALTER TABLE t1 ADD CONSTRAINT CHECK (c1 IN (1, 2, 3, 4));"
+              + "ALTER TABLE t1 ADD CONSTRAINT c2 CHECK (c1 IN (1, 2, 3, 4))"
+              + "ALTER TABLE t1 ADD CHECK (c1 IN (1, 2, 3, 4))";
+        parser.parse(ddl, tables);
+        assertThat(tables.size()).isEqualTo(3);
+
+        assertThat(tables.forTable(null, null, "t1").columns()).hasSize(2);
+        assertThat(tables.forTable(null, null, "t2").columns()).hasSize(2);
+        assertThat(tables.forTable(null, null, "t3").columns()).hasSize(2);
     }
 
     @Override

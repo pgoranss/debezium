@@ -22,9 +22,6 @@ import io.debezium.config.Field.ValidationOutput;
  */
 public class MongoDbConnectorConfig extends CommonConnectorConfig {
 
-    private static final String DATABASE_LIST_NAME = "database.list";
-    private static final String COLLECTION_LIST_NAME = "collection.list";
-
     /**
      * The comma-separated list of hostname and port pairs (in the form 'host' or 'host:port') of the MongoDB servers in the
      * replica set.
@@ -34,7 +31,6 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                            .withType(Type.LIST)
                                            .withWidth(Width.LONG)
                                            .withImportance(Importance.HIGH)
-                                           .withDependents(DATABASE_LIST_NAME)
                                            .withValidation(MongoDbConnectorConfig::validateHosts)
                                            .withDescription("The hostname and port pairs (in the form 'host' or 'host:port') "
                                                    + "of the MongoDB server(s) in the replica set.");
@@ -55,7 +51,6 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                           .withType(Type.STRING)
                                           .withWidth(Width.SHORT)
                                           .withImportance(Importance.HIGH)
-                                          .withDependents(DATABASE_LIST_NAME)
                                           .withDescription("Database user for connecting to MongoDB, if necessary.");
 
     public static final Field PASSWORD = Field.create("mongodb.password")
@@ -63,7 +58,6 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                               .withType(Type.PASSWORD)
                                               .withWidth(Width.SHORT)
                                               .withImportance(Importance.HIGH)
-                                              .withDependents(DATABASE_LIST_NAME)
                                               .withDescription("Password to be used when connecting to MongoDB, if necessary.");
 
     public static final Field POLL_INTERVAL_SEC = Field.create("mongodb.poll.interval.sec")
@@ -173,7 +167,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
 
     /**
      * A comma-separated list of regular expressions that match the fully-qualified namespaces of collections to be monitored.
-     * Fully-qualified namespaces for collections are of the form {@code '<databaseName>.<collectionName>'}.
+     * Fully-qualified namespaces for collections are of the form {@code <databaseName>.<collectionName>}.
      * May not be used with {@link #COLLECTION_BLACKLIST}.
      */
     public static final Field COLLECTION_WHITELIST = Field.create("collection.whitelist")
@@ -194,6 +188,33 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                                           .withValidation(Field::isListOfRegex)
                                                           .withInvisibleRecommender();
 
+    /**
+     * A comma-separated list of the fully-qualified names of fields that should be excluded from change event message values.
+     * Fully-qualified names for fields are of the form {@code
+     * <databaseName>.<collectionName>.<fieldName>.<nestedFieldName>}, where {@code <databaseName>} and
+     * {@code <collectionName>} may contain the wildcard ({@code *}) which matches any characters.
+     */
+    public static final Field FIELD_BLACKLIST = Field.create("field.blacklist")
+                                                     .withDisplayName("Exclude Fields")
+                                                     .withType(Type.STRING)
+                                                     .withWidth(Width.LONG)
+                                                     .withImportance(Importance.MEDIUM)
+                                                     .withDescription("");
+
+    /**
+     * A comma-separated list of the fully-qualified replacements of fields that should be used to rename fields in change
+     * event message values. Fully-qualified replacements for fields are of the form {@code
+     * <databaseName>.<collectionName>.<fieldName>.<nestedFieldName>:<newNestedFieldName>}, where
+     * {@code <databaseName>} and {@code <collectionName>} may contain the wildcard ({@code *}) which matches
+     * any characters, the colon character ({@code :}) is used to determine rename mapping of field.
+     */
+    public static final Field FIELD_RENAMES = Field.create("field.renames")
+                                                     .withDisplayName("Rename Fields")
+                                                     .withType(Type.STRING)
+                                                     .withWidth(Width.LONG)
+                                                     .withImportance(Importance.MEDIUM)
+                                                     .withDescription("");
+
     protected static final Field TASK_ID = Field.create("mongodb.task.id")
                                                 .withDescription("Internal use only")
                                                 .withValidation(Field::isInteger)
@@ -209,6 +230,8 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                                      CONNECT_BACKOFF_MAX_DELAY_MS,
                                                      COLLECTION_WHITELIST,
                                                      COLLECTION_BLACKLIST,
+                                                     FIELD_BLACKLIST,
+                                                     FIELD_RENAMES,
                                                      AUTO_DISCOVER_MEMBERS,
                                                      DATABASE_WHITELIST,
                                                      DATABASE_BLACKLIST,
@@ -225,7 +248,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
         Field.group(config, "MongoDB", HOSTS, USER, PASSWORD, LOGICAL_NAME, CONNECT_BACKOFF_INITIAL_DELAY_MS,
                     CONNECT_BACKOFF_MAX_DELAY_MS, MAX_FAILED_CONNECTIONS, AUTO_DISCOVER_MEMBERS,
                     SSL_ENABLED, SSL_ALLOW_INVALID_HOSTNAMES);
-        Field.group(config, "Events", DATABASE_WHITELIST, DATABASE_BLACKLIST, COLLECTION_WHITELIST, COLLECTION_BLACKLIST, CommonConnectorConfig.TOMBSTONES_ON_DELETE);
+        Field.group(config, "Events", DATABASE_WHITELIST, DATABASE_BLACKLIST, COLLECTION_WHITELIST, COLLECTION_BLACKLIST, FIELD_BLACKLIST, FIELD_RENAMES, CommonConnectorConfig.TOMBSTONES_ON_DELETE);
         Field.group(config, "Connector", MAX_COPY_THREADS, CommonConnectorConfig.MAX_QUEUE_SIZE, CommonConnectorConfig.MAX_BATCH_SIZE, CommonConnectorConfig.POLL_INTERVAL_MS);
         return config;
     }
