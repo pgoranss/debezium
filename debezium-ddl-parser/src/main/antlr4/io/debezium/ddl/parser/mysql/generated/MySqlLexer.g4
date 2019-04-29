@@ -47,6 +47,7 @@ LINE_COMMENT:                        (
 ADD:                                 'ADD';
 ALL:                                 'ALL';
 ALTER:                               'ALTER';
+ALWAYS:                              'ALWAYS';
 ANALYZE:                             'ANALYZE';
 AND:                                 'AND';
 AS:                                  'AS';
@@ -99,6 +100,7 @@ FORCE:                               'FORCE';
 FOREIGN:                             'FOREIGN';
 FROM:                                'FROM';
 FULLTEXT:                            'FULLTEXT';
+GENERATED:                           'GENERATED';
 GRANT:                               'GRANT';
 GROUP:                               'GROUP';
 HAVING:                              'HAVING';
@@ -183,6 +185,7 @@ SQL_CALC_FOUND_ROWS:                 'SQL_CALC_FOUND_ROWS';
 SQL_SMALL_RESULT:                    'SQL_SMALL_RESULT';
 SSL:                                 'SSL';
 STARTING:                            'STARTING';
+STORED:                              'STORED';
 STRAIGHT_JOIN:                       'STRAIGHT_JOIN';
 TABLE:                               'TABLE';
 TERMINATED:                          'TERMINATED';
@@ -201,6 +204,7 @@ USAGE:                               'USAGE';
 USE:                                 'USE';
 USING:                               'USING';
 VALUES:                              'VALUES';
+VIRTUAL:                             'VIRTUAL';
 WHEN:                                'WHEN';
 WHERE:                               'WHERE';
 WHILE:                               'WHILE';
@@ -247,6 +251,7 @@ MEDIUMTEXT:                          'MEDIUMTEXT';
 LONGTEXT:                            'LONGTEXT';
 ENUM:                                'ENUM';
 VARYING:                             'VARYING';
+SERIAL:                              'SERIAL';
 
 
 // Interval type Keywords
@@ -719,6 +724,7 @@ SERIALIZABLE:                        'SERIALIZABLE';
 // Spatial data types
 
 GEOMETRYCOLLECTION:                  'GEOMETRYCOLLECTION';
+GEOMCOLLECTION:                      'GEOMCOLLECTION';
 GEOMETRY:                            'GEOMETRY';
 LINESTRING:                          'LINESTRING';
 MULTILINESTRING:                     'MULTILINESTRING';

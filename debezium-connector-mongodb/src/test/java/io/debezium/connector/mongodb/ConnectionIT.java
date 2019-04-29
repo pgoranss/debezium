@@ -72,7 +72,7 @@ public class ConnectionIT extends AbstractMongoIT {
                 MongoCollection<Document> movies = collection;
                 InsertOneOptions insertOptions = new InsertOneOptions().bypassDocumentValidation(true);
                 movies.insertOne(Document.parse("{ \"name\":\"Starter Wars\"}"), insertOptions);
-                assertThat(collection.count()).isEqualTo(1);
+                assertThat(collection.countDocuments()).isEqualTo(1);
 
                 // Read the collection to make sure we can find our document ...
                 Bson filter = Filters.eq("name", "Starter Wars");
@@ -97,7 +97,7 @@ public class ConnectionIT extends AbstractMongoIT {
         primary.execute("read oplog from beginning", mongo -> {
             Testing.debug("Getting local.oplog.rs");
 
-            BsonTimestamp oplogStart = new BsonTimestamp(1,1);
+            BsonTimestamp oplogStart = new BsonTimestamp(1, 1);
             Bson filter = Filters.and(Filters.gt("ts", oplogStart), // start just after our last position
                                       Filters.exists("fromMigrate", false)); // skip internal movements across shards
             FindIterable<Document> results = mongo.getDatabase("local")

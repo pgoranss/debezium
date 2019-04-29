@@ -42,9 +42,13 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
 
         @Override
         default int compareTo(Entry that) {
-            if (that == null) return 1;
+            if (that == null) {
+                return 1;
+            }
             int diff = this.getIndex() - that.getIndex();
-            if (diff != 0) return diff;
+            if (diff != 0) {
+                return diff;
+            }
             return this.getValue().compareTo(that.getValue());
         }
     }
@@ -88,7 +92,9 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
     }
 
     static Array create(Iterable<?> values) {
-        if (values == null) return create();
+        if (values == null) {
+            return create();
+        }
         BasicArray array = new BasicArray();
         values.forEach(obj -> array.add(Value.create(obj)));
         return array;
@@ -471,7 +477,9 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
         for (int i = 0; i != size(); ++i) {
             Value existing = get(i);
             Value updated = transformer.apply(Integer.valueOf(i), existing);
-            if (updated == null) updated = Value.nullValue();
+            if (updated == null) {
+                updated = Value.nullValue();
+            }
             if (updated != existing) {
                 setValue(i, updated);
             }
@@ -618,7 +626,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize) {
-        return expand(desiredSize,Value.nullValue());
+        return expand(desiredSize, Value.nullValue());
     }
     
     /**
@@ -640,7 +648,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize, boolean value) {
-        return expand(desiredSize,Value.create(value));
+        return expand(desiredSize, Value.create(value));
     }
 
     /**
@@ -652,7 +660,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize, int value) {
-        return expand(desiredSize,Value.create(value));
+        return expand(desiredSize, Value.create(value));
     }
 
     /**
@@ -664,7 +672,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize, long value) {
-        return expand(desiredSize,Value.create(value));
+        return expand(desiredSize, Value.create(value));
     }
 
     /**
@@ -676,7 +684,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize, float value) {
-        return expand(desiredSize,Value.create(value));
+        return expand(desiredSize, Value.create(value));
     }
 
     /**
@@ -688,7 +696,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize, double value) {
-        return expand(desiredSize,Value.create(value));
+        return expand(desiredSize, Value.create(value));
     }
 
     /**
@@ -700,7 +708,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @return this array to allow for chaining methods
      */
     default Array expand(int desiredSize, String value) {
-        return expand(desiredSize,Value.create(value));
+        return expand(desiredSize, Value.create(value));
     }
 
     /**
@@ -711,7 +719,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @throws IllegalArgumentException if the current value is not a number
      */
     default Array increment( int index, int increment ) {
-        return increment(index,Value.create(increment));
+        return increment(index, Value.create(increment));
     }
 
     /**
@@ -722,7 +730,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @throws IllegalArgumentException if the current value is not a number
      */
     default Array increment( int index, long increment ) {
-        return increment(index,Value.create(increment));
+        return increment(index, Value.create(increment));
     }
 
     /**
@@ -733,7 +741,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @throws IllegalArgumentException if the current value is not a number
      */
     default Array increment( int index, double increment ) {
-        return increment(index,Value.create(increment));
+        return increment(index, Value.create(increment));
     }
 
     /**
@@ -744,7 +752,7 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      * @throws IllegalArgumentException if the current value is not a number
      */
     default Array increment( int index, float increment ) {
-        return increment(index,Value.create(increment));
+        return increment(index, Value.create(increment));
     }
 
     /**
@@ -776,7 +784,9 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      */
     default Document setDocument(int index,
                                  Document document) {
-        if (document == null) document = Document.create();
+        if (document == null) {
+            document = Document.create();
+        }
         setValue(index, Value.create(document));
         return document;
     }
@@ -801,7 +811,9 @@ public interface Array extends Iterable<Array.Entry>, Comparable<Array> {
      */
     default Array setArray(int index,
                            Array array) {
-        if (array == null) array = Array.create();
+        if (array == null) {
+            array = Array.create();
+        }
         setValue(index, Value.create(array));
         return array;
     }

@@ -6,6 +6,7 @@
 
 package io.debezium.connector.postgresql.connection;
 
+import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
@@ -18,9 +19,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
+import io.debezium.connector.postgresql.spi.SlotState;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.postgresql.core.BaseConnection;
 import org.postgresql.core.TypeInfo;
+import org.postgresql.jdbc.PgConnection;
 import org.postgresql.jdbc.PgDatabaseMetaData;
 import org.postgresql.replication.LogSequenceNumber;
 import org.postgresql.util.PSQLState;
@@ -69,6 +72,8 @@ public class PostgresConnection extends JdbcConnection {
 
     private final TypeRegistry typeRegistry;
 
+    private final Charset databaseCharset;
+
     /**
      * Creates a Postgres connection using the supplied configuration.
      *
@@ -81,8 +86,10 @@ public class PostgresConnection extends JdbcConnection {
             typeRegistry = initTypeRegistry(connection());
         }
         catch (SQLException e) {
-            throw new ConnectException("Could not intialize type registry", e);
+            throw new ConnectException("Could not initialize type registry", e);
         }
+
+        databaseCharset = determineDatabaseCharset();
     }
 
     /**
@@ -92,23 +99,6 @@ public class PostgresConnection extends JdbcConnection {
      */
     public String connectionString() {
         return connectionString(URL_PATTERN);
-    }
-
-    /**
-     * Executes a series of statements without explicitly committing the connection.
-     *
-     * @param statements a series of statements to execute
-     * @return this object so methods can be chained together; never null
-     * @throws SQLException if anything fails
-     */
-    public PostgresConnection executeWithoutCommitting(String... statements) throws SQLException {
-        Connection conn = connection();
-        try (Statement statement = conn.createStatement()) {
-            for (String stmt : statements) {
-                statement.execute(stmt);
-            }
-        }
-        return this;
     }
 
     /**
@@ -131,40 +121,84 @@ public class PostgresConnection extends JdbcConnection {
         }, rs -> {
             if (rs.next()) {
                 replIdentity.append(rs.getString(1));
-            } else {
+            }
+            else {
                 LOGGER.warn("Cannot determine REPLICA IDENTITY information for table '{}'", tableId);
             }
         });
         return ServerInfo.ReplicaIdentity.parseFromDB(replIdentity.toString());
     }
 
+    /**
+     * Returns the current state of the replication slot
+     * @param slotName the name of the slot
+     * @param pluginName the name of the plugin used for the desired slot
+     * @return the {@link SlotState} or null, if no slot state is found
+     * @throws SQLException
+     */
+    public SlotState getReplicationSlotInfo(String slotName, String pluginName) throws SQLException {
+        ServerInfo.ReplicationSlot slot = fetchReplicationSlotInfo(slotName, pluginName);
+        if (slot.equals(ServerInfo.ReplicationSlot.INVALID)) {
+            return null;
+        }
+        else {
+            return slot.asSlotState();
+        }
+    }
+
+    /**
+     * Fetches the state of a replication stage given a slot name and plugin name
+     * @param slotName the name of the slot
+     * @param pluginName the name of the plugin used for the desired slot
+     * @return the {@link ServerInfo.ReplicationSlot} object or a {@link ServerInfo.ReplicationSlot#INVALID} if
+     *         the slot is not valid
+     * @throws SQLException is thrown by the underlying JDBC
+     */
+    protected ServerInfo.ReplicationSlot fetchReplicationSlotInfo(String slotName, String pluginName) throws SQLException {
+        final String database = database();
+        final ServerInfo.ReplicationSlot slot = queryForSlot(slotName, database, pluginName,
+                rs -> {
+                    if (rs.next()) {
+                        boolean active = rs.getBoolean("active");
+                        Long confirmedFlushedLsn = parseConfirmedFlushLsn(slotName, pluginName, database, rs);
+                        if (confirmedFlushedLsn == null) {
+                            return null;
+                        }
+                        Long restartLsn = parseRestartLsn(slotName, pluginName, database, rs);
+                        if (restartLsn == null) {
+                            return null;
+                        }
+                        Long xmin = rs.getLong("catalog_xmin");
+                        return new ServerInfo.ReplicationSlot(active, confirmedFlushedLsn, restartLsn, xmin);
+                    }
+                    else {
+                        LOGGER.debug("No replication slot '{}' is present for plugin '{}' and database '{}'", slotName,
+                                pluginName, database);
+                        return ServerInfo.ReplicationSlot.INVALID;
+                    }
+                }
+        );
+        return slot;
+    }
+
+    /**
+     * Fetches a replication slot, repeating the query until either the slot is created or until
+     * the max number of attempts has been reached
+     *
+     * To fetch the slot without teh retries, use the {@link PostgresConnection#fetchReplicationSlotInfo} call
+     * @param slotName the slot name
+     * @param pluginName the name of the plugin
+     * @return the {@link ServerInfo.ReplicationSlot} object or a {@link ServerInfo.ReplicationSlot#INVALID} if
+     *         the slot is not valid
+     * @throws SQLException is thrown by the underyling jdbc driver
+     * @throws InterruptedException is thrown if we don't return an answer within the set number of retries
+     */
     protected ServerInfo.ReplicationSlot readReplicationSlotInfo(String slotName, String pluginName) throws SQLException, InterruptedException {
         final String database = database();
         final Metronome metronome = Metronome.parker(PAUSE_BETWEEN_REPLICATION_SLOT_RETRIEVAL_ATTEMPTS, Clock.SYSTEM);
 
         for (int attempt = 1; attempt <= MAX_ATTEMPTS_FOR_OBTAINING_REPLICATION_SLOT; attempt++) {
-            final ServerInfo.ReplicationSlot slot = prepareQueryAndMap(
-                    "select * from pg_replication_slots where slot_name = ? and database = ? and plugin = ?", statement -> {
-                        statement.setString(1, slotName);
-                        statement.setString(2, database);
-                        statement.setString(3, pluginName);
-                    },
-                    rs -> {
-                        if (rs.next()) {
-                            boolean active = rs.getBoolean("active");
-                            Long confirmedFlushedLSN = parseConfirmedFlushLsn(slotName, pluginName, database, rs);
-                            if (confirmedFlushedLSN == null) {
-                                return null;
-                            }
-                            return new ServerInfo.ReplicationSlot(active, confirmedFlushedLSN);
-                        }
-                        else {
-                            LOGGER.debug("No replication slot '{}' is present for plugin '{}' and database '{}'", slotName,
-                                         pluginName, database);
-                            return ServerInfo.ReplicationSlot.INVALID;
-                        }
-                    }
-               );
+            final ServerInfo.ReplicationSlot slot = fetchReplicationSlotInfo(slotName, pluginName);
             if (slot != null) {
                 LOGGER.info("Obtained valid replication slot {}", slot);
                 return slot;
@@ -177,32 +211,70 @@ public class PostgresConnection extends JdbcConnection {
                 + "Make sure there are no long-running transactions running in parallel as they may hinder the allocation of the replication slot when starting this connector");
     }
 
+    protected ServerInfo.ReplicationSlot queryForSlot(String slotName, String database, String pluginName,
+                                                      ResultSetMapper<ServerInfo.ReplicationSlot> map) throws SQLException {
+        return prepareQueryAndMap("select * from pg_replication_slots where slot_name = ? and database = ? and plugin = ?", statement -> {
+            statement.setString(1, slotName);
+            statement.setString(2, database);
+            statement.setString(3, pluginName);
+        }, map);
+    }
+
+    /**
+     * Obtains the LSN to resume streaming from. On PG 9.5 there is no confirmed_flushed_lsn yet, so restart_lsn will be
+     * read instead. This may result in more records to be re-read after a restart.
+     */
     private Long parseConfirmedFlushLsn(String slotName, String pluginName, String database, ResultSet rs) {
         Long confirmedFlushedLsn = null;
 
         try {
-            String confirmedFlushLSNString = rs.getString("confirmed_flush_lsn");
-            if (confirmedFlushLSNString == null) {
-                return null;
-            }
-            try {
-                confirmedFlushedLsn = LogSequenceNumber.valueOf(confirmedFlushLSNString).asLong();
-            }
-            catch (Exception e) {
-                throw new ConnectException("Value confirmed_flush_lsn in the pg_replication_slots table for slot = '"
-                        + slotName + "', plugin = '"
-                        + pluginName + "', database = '"
-                        + database + "' is not valid. This is an abnormal situation and the database status should be checked.");
-            }
-            if (confirmedFlushedLsn == LogSequenceNumber.INVALID_LSN.asLong()) {
-                throw new ConnectException("Invalid LSN returned from database");
-            }
-         }
+            confirmedFlushedLsn = tryParseLsn(slotName, pluginName, database, rs, "confirmed_flush_lsn");
+        }
         catch (SQLException e) {
-            // info not available, so we must be prior to PG 9.6
+            LOGGER.info("unable to find confirmed_flushed_lsn, falling back to restart_lsn");
+            try {
+                confirmedFlushedLsn = tryParseLsn(slotName, pluginName, database, rs, "restart_lsn");
+            }
+            catch (SQLException e2) {
+                throw new ConnectException("Neither confirmed_flush_lsn nor restart_lsn could be found");
+            }
         }
 
         return confirmedFlushedLsn;
+    }
+
+    private Long parseRestartLsn(String slotName, String pluginName, String database, ResultSet rs) {
+        Long restartLsn = null;
+        try {
+            restartLsn = tryParseLsn(slotName, pluginName, database, rs, "restart_lsn");
+        }
+        catch (SQLException e) {
+            throw new ConnectException("restart_lsn could be found");
+        }
+
+        return restartLsn;
+    }
+
+    private Long tryParseLsn(String slotName, String pluginName, String database, ResultSet rs, String column) throws ConnectException, SQLException {
+        Long lsn = null;
+
+        String lsnStr = rs.getString(column);
+        if (lsnStr == null) {
+            return null;
+        }
+        try {
+            lsn = LogSequenceNumber.valueOf(lsnStr).asLong();
+        }
+        catch (Exception e) {
+            throw new ConnectException("Value " + column + " in the pg_replication_slots table for slot = '"
+                    + slotName + "', plugin = '"
+                    + pluginName + "', database = '"
+                    + database + "' is not valid. This is an abnormal situation and the database status should be checked.");
+        }
+        if (lsn == LogSequenceNumber.INVALID_LSN.asLong()) {
+            throw new ConnectException("Invalid LSN returned from database");
+        }
+        return lsn;
     }
 
     /**
@@ -307,6 +379,19 @@ public class PostgresConnection extends JdbcConnection {
         return serverInfo;
     }
 
+    public Charset getDatabaseCharset() {
+        return databaseCharset;
+    }
+
+    private Charset determineDatabaseCharset() {
+        try {
+            return Charset.forName(((PgConnection) connection()).getEncoding().name());
+        }
+        catch (SQLException e) {
+            throw new RuntimeException("Couldn't obtain encoding for database " + database(), e);
+        }
+    }
+
     protected static void defaultSettings(Configuration.Builder builder) {
         // we require Postgres 9.4 as the minimum server version since that's where logical replication was first introduced
         builder.with("assumeMinServerVersion", "9.4");
@@ -339,7 +424,7 @@ public class PostgresConnection extends JdbcConnection {
                     while (rs.next()) {
                         // Coerce long to int so large unsigned values are represented as signed
                         // Same technique is used in TypeInfoCache
-                        final int oid = (int)rs.getLong("oid");
+                        final int oid = (int) rs.getLong("oid");
                         String typeName = rs.getString("name");
                         typeRegistryBuilder.addType(new PostgresType(
                                 typeName,
@@ -354,14 +439,13 @@ public class PostgresConnection extends JdbcConnection {
                 try (final ResultSet rs = statement.executeQuery(SQL_ARRAY_TYPES)) {
                     while (rs.next()) {
                         // int2vector and oidvector will not be treated as arrays
-                        final int oid = (int)rs.getLong("oid");
+                        final int oid = (int) rs.getLong("oid");
                         String typeName = rs.getString("name");
                         typeRegistryBuilder.addType(new PostgresType(
                                 typeName,
                                 oid,
                                 sqlTypeMapper.getSqlType(typeName),
-                                typeInfo,
-                                typeRegistryBuilder.get((int)rs.getLong("element"))
+                                typeInfo, typeRegistryBuilder.get((int) rs.getLong("element"))
                         ));
                     }
                 }

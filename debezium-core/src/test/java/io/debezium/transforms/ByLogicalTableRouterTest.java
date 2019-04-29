@@ -17,6 +17,8 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Test;
 
+import io.debezium.doc.FixFor;
+
 /**
  * @author Mario Mueller
  */
@@ -132,7 +134,7 @@ public class ByLogicalTableRouterTest {
 
         Schema keySchema = SchemaBuilder.struct()
                 .name("io.debezium.connector.mysql.ServerNameKey")
-                .field(keyFieldName,Schema.STRING_SCHEMA)
+                .field(keyFieldName, Schema.STRING_SCHEMA)
                 .build();
 
         Struct key1 = new Struct(keySchema).put(keyFieldName, "test_server_name_db");
@@ -194,6 +196,31 @@ public class ByLogicalTableRouterTest {
         props.put("topic.regex", "someValidRegex(.*)");
         props.put("topic.replacement", "");
         subject.configure(props);
+    }
+
+    @Test
+    @FixFor("DBZ-1086")
+    public void testKeyNullValue() {
+        final ByLogicalTableRouter<SourceRecord> router = new ByLogicalTableRouter<>();
+        final Map<String, String> props = new HashMap<>();
+
+        props.put("topic.regex", "(.*)customers_shard(.*)");
+        props.put("topic.replacement", "$1customers_all_shards");
+        props.put("key.field.name", "shard_id");
+        props.put("key.field.regex", "(.*)customers_shard_(.*)");
+        props.put("key.field.replacement", "$2");
+        router.configure(props);
+
+        SourceRecord record1 = new SourceRecord(
+                new HashMap<>(), new HashMap<>(), "mysql-server-1.inventory.customers_shard_1", null, null, null, null
+        );
+
+        SourceRecord transformed1 = router.apply(record1);
+        assertThat(transformed1).isNotNull();
+        assertThat(transformed1.topic()).isEqualTo("mysql-server-1.inventory.customers_all_shards");
+
+        assertThat(transformed1.keySchema()).isNull();
+        assertThat(transformed1.key()).isNull();
     }
 
     // FIXME: This SMT can use more tests for more detailed coverage.

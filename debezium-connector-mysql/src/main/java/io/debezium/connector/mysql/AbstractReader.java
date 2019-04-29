@@ -22,6 +22,7 @@ import org.slf4j.LoggerFactory;
 import com.github.shyiko.mysql.binlog.network.ServerException;
 
 import io.debezium.config.ConfigurationDefaults;
+import io.debezium.connector.base.ChangeEventQueueMetrics;
 import io.debezium.time.Temporals;
 import io.debezium.util.Clock;
 import io.debezium.util.Metronome;
@@ -36,6 +37,7 @@ import io.debezium.util.Threads.Timer;
 public abstract class AbstractReader implements Reader {
 
     protected final Logger logger = LoggerFactory.getLogger(getClass());
+
     private final String name;
     protected final MySqlTaskContext context;
     protected final MySqlJdbcContext connectionContext;
@@ -48,14 +50,21 @@ public abstract class AbstractReader implements Reader {
     private final Metronome metronome;
     private final AtomicReference<Runnable> uponCompletion = new AtomicReference<>();
     private final Duration pollInterval;
+    protected final ChangeEventQueueMetrics changeEventQueueMetrics;
+
+    private final HaltingPredicate acceptAndContinue;
 
     /**
      * Create a snapshot reader.
      *
      * @param name the name of the reader
      * @param context the task context in which this reader is running; may not be null
+     * @param acceptAndContinue a predicate that returns true if the tested {@link SourceRecord} should be accepted and
+     *                          false if the record and all subsequent records should be ignored. The reader will stop
+     *                          accepting records once {@link #enqueueRecord(SourceRecord)} is called with a record
+     *                          that tests as false. Can be null. If null, all records will be accepted.
      */
-    public AbstractReader(String name, MySqlTaskContext context) {
+    public AbstractReader(String name, MySqlTaskContext context, HaltingPredicate acceptAndContinue) {
         this.name = name;
         this.context = context;
         this.connectionContext = context.getConnectionContext();
@@ -63,6 +72,19 @@ public abstract class AbstractReader implements Reader {
         this.maxBatchSize = context.getConnectorConfig().getMaxBatchSize();
         this.pollInterval = context.getConnectorConfig().getPollInterval();
         this.metronome = Metronome.parker(pollInterval, Clock.SYSTEM);
+        this.acceptAndContinue = acceptAndContinue == null? new AcceptAllPredicate() : acceptAndContinue;
+        this.changeEventQueueMetrics = new ChangeEventQueueMetrics() {
+
+            @Override
+            public int totalCapacity() {
+                return context.getConnectorConfig().getMaxQueueSize();
+            }
+
+            @Override
+            public int remainingCapacity() {
+                return records.remainingCapacity();
+            }
+        };
     }
 
     @Override
@@ -98,9 +120,17 @@ public abstract class AbstractReader implements Reader {
     @Override
     public void stop() {
         try {
+            // Emptying the queue so to make sure that enqueue() won't block indefinitely when adding records after
+            // poll() isn't called anymore but before the binlog reader is stopped; note there's still a tiny chance for
+            // this to happen if enough records are added again between here and the call to disconnect(); protecting
+            // against it seems not worth though it as shouldn't happen for any practical queue size
+            List<SourceRecord> unsent = new ArrayList<>();
+            records.drainTo(unsent);
+            logger.info("Discarding {} unsent record(s) due to the connector shutting down", unsent.size());
             doStop();
             running.set(false);
-        } finally {
+        }
+        finally {
             if (failure.get() != null) {
                 // We had a failure and it was propagated via poll(), after which Kafka Connect will stop
                 // the connector, which will stop the task that will then stop this reader via this method.
@@ -244,7 +274,9 @@ public abstract class AbstractReader implements Reader {
 
             // Check for failure after waking up ...
             failureException = this.failure.get();
-            if (failureException != null) throw failureException;
+            if (failureException != null) {
+                throw failureException;
+            }
             if (timeout.expired()) {
                 break;
             }
@@ -295,11 +327,34 @@ public abstract class AbstractReader implements Reader {
      * @throws InterruptedException if interrupted while waiting for the queue to have room for this record
      */
     protected void enqueueRecord(SourceRecord record) throws InterruptedException {
-        if (record != null) {
-            if (logger.isTraceEnabled()) {
-                logger.trace("Enqueuing source record: {}", record);
+        if (record != null && running.get()) {
+            if (acceptAndContinue.accepts(record)) {
+                if (logger.isTraceEnabled()) {
+                    logger.trace("Enqueuing source record: {}", record);
+                }
+                this.records.put(record);
             }
-            this.records.put(record);
+            else {
+                // if we found a record we should not accept, we are done.
+                logger.info("predicate returned false; completing reader {}", this.name);
+                completeSuccessfully();
+            }
+        }
+    }
+
+    @Override
+    public String toString() {
+        return name;
+    }
+
+    /**
+     * A predicate that returns true for all sourceRecords
+     */
+    public static class AcceptAllPredicate implements HaltingPredicate {
+
+        @Override
+        public boolean accepts(SourceRecord sourceRecord) {
+            return true;
         }
     }
 }

@@ -9,8 +9,10 @@ package io.debezium.connector.postgresql.connection;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Map;
@@ -19,14 +21,17 @@ import java.util.concurrent.Future;
 
 import org.junit.After;
 import org.junit.Test;
+import org.postgresql.jdbc.PgConnection;
 
 import io.debezium.connector.postgresql.TestHelper;
+import io.debezium.doc.FixFor;
+import io.debezium.jdbc.JdbcConnection;
 import io.debezium.relational.TableId;
 import io.debezium.util.Testing;
 
 /**
  * Integration test for {@link PostgresConnection}
- * 
+ *
  * @author Horia Chiorean (hchiorea@redhat.com)
  */
 public class PostgresConnectionIT {
@@ -42,7 +47,7 @@ public class PostgresConnectionIT {
             connection.connect();
             assertTrue(connection.currentTransactionId() > 0);
         }
-        
+
         try (PostgresConnection connection = TestHelper.create()) {
             connection.connect();
             connection.setAutoCommit(false);
@@ -112,6 +117,33 @@ public class PostgresConnectionIT {
     }
 
     @Test
+    @FixFor("DBZ-934")
+    public void temporaryReplicationSlotsShouldGetDroppedAutomatically() throws Exception {
+        try(ReplicationConnection replicationConnection = TestHelper.createForReplication("test", true)) {
+            PgConnection pgConnection = getUnderlyingConnection(replicationConnection);
+
+            // temporary replication slots are not supported by Postgres < 10
+            if (pgConnection.getServerMajorVersion() < 10) {
+                return;
+            }
+
+            // simulate ungraceful shutdown by closing underlying database connection
+            pgConnection.close();
+
+            try (PostgresConnection connection = TestHelper.create()) {
+                assertFalse("postgres did not drop replication slot", connection.dropReplicationSlot("test"));
+            }
+        }
+    }
+
+    private PgConnection getUnderlyingConnection(ReplicationConnection connection) throws Exception {
+        Field connField = JdbcConnection.class.getDeclaredField("conn");
+        connField.setAccessible(true);
+
+        return (PgConnection) connField.get(connection);
+    }
+
+    @Test
     public void shouldDetectRunningConncurrentTxOnInit() throws Exception {
         Testing.Print.enable();
         // drop the slot from the previous connection
@@ -175,5 +207,37 @@ public class PostgresConnectionIT {
                 assertTrue(connection.dropReplicationSlot(slotName));
             }
         }
+    }
+
+    @Test
+    public void shouldSupportPG95RestartLsn() throws Exception {
+        String slotName = "pg95";
+        try (ReplicationConnection replConnection = TestHelper.createForReplication(slotName, false)) {
+            assertTrue(replConnection.isConnected());
+        }
+        try (PostgresConnection conn = buildPG95PGConn("pg95")) {
+            ServerInfo.ReplicationSlot slotInfo = conn.readReplicationSlotInfo(slotName, TestHelper.decoderPlugin().getPostgresPluginName());
+            assertNotNull(slotInfo);
+            assertNotEquals(ServerInfo.ReplicationSlot.INVALID, slotInfo);
+            conn.dropReplicationSlot(slotName);
+        }
+
+    }
+
+    // "fake" a pg95 response by not returning confirmed_flushed_lsn
+    private PostgresConnection buildPG95PGConn(String name) {
+        return new PostgresConnection(TestHelper.defaultJdbcConfig().edit().with("ApplicationName", name).build()) {
+            @Override
+            protected ServerInfo.ReplicationSlot queryForSlot(String slotName, String database, String pluginName,
+                                                              ResultSetMapper<ServerInfo.ReplicationSlot> map) throws SQLException {
+
+                String fields = "slot_name, plugin, slot_type, datoid, database, active, active_pid, xmin, catalog_xmin, restart_lsn";
+                return prepareQueryAndMap("select " + fields + " from pg_replication_slots where slot_name = ? and database = ? and plugin = ?", statement -> {
+                    statement.setString(1, slotName);
+                    statement.setString(2, database);
+                    statement.setString(3, pluginName);
+                }, map);
+            }
+        };
     }
 }

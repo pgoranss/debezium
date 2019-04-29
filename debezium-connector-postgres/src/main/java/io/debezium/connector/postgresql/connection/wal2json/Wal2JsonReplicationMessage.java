@@ -8,6 +8,7 @@ package io.debezium.connector.postgresql.connection.wal2json;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -53,13 +54,13 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
     private static final Logger LOGGER = LoggerFactory.getLogger(Wal2JsonReplicationMessage.class);
 
     private final long txId;
-    private final long commitTime;
+    private final Instant commitTime;
     private final Document rawMessage;
     private final boolean hasMetadata;
     private final boolean lastEventForLsn;
     private final TypeRegistry typeRegistry;
 
-    public Wal2JsonReplicationMessage(long txId, long commitTime, Document rawMessage, boolean hasMetadata, boolean lastEventForLsn, TypeRegistry typeRegistry) {
+    public Wal2JsonReplicationMessage(long txId, Instant commitTime, Document rawMessage, boolean hasMetadata, boolean lastEventForLsn, TypeRegistry typeRegistry) {
         this.txId = txId;
         this.commitTime = commitTime;
         this.rawMessage = rawMessage;
@@ -84,7 +85,7 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
     }
 
     @Override
-    public long getCommitTime() {
+    public Instant getCommitTime() {
         return commitTime;
     }
 
@@ -140,6 +141,11 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
                     return Wal2JsonReplicationMessage.this.getValue(columnName, columnType, columnTypeName, rawValue, connection, includeUnknownDatatypes);
                 }
 
+                @Override
+                public String toString() {
+                    return columnName + "(" + columnTypeName + ")=" + rawValue;
+                }
+
             });
         }
 
@@ -186,20 +192,23 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
                 final String dataString = rawValue.asString();
                 PgArray arrayData = new PgArray(connection.get(), type.getOid(), dataString);
                 Object deserializedArray = arrayData.getArray();
-                return Arrays.asList((Object[])deserializedArray);
+                return Arrays.asList((Object[]) deserializedArray);
             }
             catch (SQLException e) {
                 LOGGER.warn("Unexpected exception trying to process PgArray ({}) column '{}', {}", fullType, columnName, e);
             }
             return null;
         }
-
         switch (type.getName()) {
+
             // include all types from https://www.postgresql.org/docs/current/static/datatype.html#DATATYPE-TABLE
             // plus aliases from the shorter names produced by older wal2json
             case "boolean":
             case "bool":
                 return rawValue.asBoolean();
+
+            case "hstore":
+                return rawValue.asString();
 
             case "integer":
             case "int":
@@ -343,6 +352,7 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
             case "geography":
                 return rawValue.asString();
 
+            case "citext":
             case "bit":
             case "bit varying":
             case "varbit":
@@ -350,14 +360,20 @@ class Wal2JsonReplicationMessage implements ReplicationMessage {
             case "jsonb":
             case "xml":
             case "uuid":
+            case "tsrange":
             case "tstzrange":
-                return rawValue.asString();
-            // catch-all for other known/builtin PG types
-            // TODO: improve with more specific/useful classes here?
-            case "cidr":
+            case "daterange":
             case "inet":
+            case "cidr":
             case "macaddr":
             case "macaddr8":
+            case "int4range":
+            case "numrange":
+            case "int8range":
+            return rawValue.asString();
+
+            // catch-all for other known/builtin PG types
+            // TODO: improve with more specific/useful classes here?
             case "pg_lsn":
             case "tsquery":
             case "tsvector":

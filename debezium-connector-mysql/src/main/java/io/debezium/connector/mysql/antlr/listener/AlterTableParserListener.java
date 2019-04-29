@@ -12,6 +12,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.antlr.v4.runtime.tree.ParseTreeListener;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.mysql.antlr.MySqlAntlrDdlParser;
 import io.debezium.ddl.parser.mysql.generated.MySqlParser;
@@ -31,6 +33,8 @@ public class AlterTableParserListener extends MySqlParserBaseListener {
 
     private static final int STARTING_INDEX = 1;
 
+    private final static Logger LOG = LoggerFactory.getLogger(AlterTableParserListener.class);
+
     private final MySqlAntlrDdlParser parser;
     private final List<ParseTreeListener> listeners;
 
@@ -49,6 +53,7 @@ public class AlterTableParserListener extends MySqlParserBaseListener {
     public void enterAlterTable(MySqlParser.AlterTableContext ctx) {
         final TableId tableId = parser.parseQualifiedTableId(ctx.tableName().fullId());
         if (!parser.getTableFilter().isIncluded(tableId)) {
+            LOG.debug("Ignoring ALTER TABLE statement for non-whitelisted table {}", tableId);
             return;
         }
         tableEditor = parser.databaseTables().editTable(tableId);
@@ -236,7 +241,9 @@ public class AlterTableParserListener extends MySqlParserBaseListener {
     @Override
     public void enterAlterByRename(MySqlParser.AlterByRenameContext ctx) {
         parser.runIfNotNull(() -> {
-            TableId newTableId = parser.resolveTableId(parser.currentSchema(), parser.parseName(ctx.uid()));
+            final TableId newTableId = ctx.uid() != null
+                    ? parser.resolveTableId(parser.currentSchema(), parser.parseName(ctx.uid()))
+                    : parser.parseQualifiedTableId(ctx.fullId());
             parser.databaseTables().renameTable(tableEditor.tableId(), newTableId);
             // databaseTables are updated clear table editor so exitAlterTable will not update a table by table editor
             tableEditor = null;
@@ -282,5 +289,44 @@ public class AlterTableParserListener extends MySqlParserBaseListener {
             }
         }, tableEditor);
         super.enterAlterByAddUniqueKey(ctx);
+    }
+
+    @Override
+    public void enterAlterByRenameColumn(MySqlParser.AlterByRenameColumnContext ctx) {
+        parser.runIfNotNull(() -> {
+            String oldColumnName = parser.parseName(ctx.oldColumn);
+            Column existingColumn = tableEditor.columnWithName(oldColumnName);
+            if (existingColumn != null) {
+                // DBZ-771 unset previously set default value, as it's not kept by MySQL; for any column modifications a new
+                // default value (which could be the same) has to be provided by the column_definition which we'll parse later
+                // on; only in 8.0 (not yet supported by this parser) columns can be renamed without repeating the full column
+                // definition; so in fact it's arguably not correct to use edit() on the existing column to begin with, but
+                // I'm going to leave this as is for now, to be prepared for the ability of updating column definitions in 8.0
+                ColumnEditor columnEditor = existingColumn.edit();
+//                columnEditor.unsetDefaultValue();
+
+                columnDefinitionListener = new ColumnDefinitionParserListener(tableEditor, columnEditor, parser.dataTypeResolver(), parser.getConverters());
+                listeners.add(columnDefinitionListener);
+            }
+            else {
+                throw new ParsingException(null, "Trying to change column " + oldColumnName + " in "
+                        + tableEditor.tableId().toString() + " table, which does not exist. Query: " + getText(ctx));
+            }
+        }, tableEditor);
+        super.enterAlterByRenameColumn(ctx);
+    }
+
+    @Override
+    public void exitAlterByRenameColumn(MySqlParser.AlterByRenameColumnContext ctx) {
+        parser.runIfNotNull(() -> {
+            Column column = columnDefinitionListener.getColumn();
+            tableEditor.addColumn(column);
+            String newColumnName = parser.parseName(ctx.newColumn);
+            if (newColumnName != null && !column.name().equalsIgnoreCase(newColumnName)) {
+                tableEditor.renameColumn(column.name(), newColumnName);
+            }
+            listeners.remove(columnDefinitionListener);
+        }, tableEditor, columnDefinitionListener);
+        super.exitAlterByRenameColumn(ctx);
     }
 }

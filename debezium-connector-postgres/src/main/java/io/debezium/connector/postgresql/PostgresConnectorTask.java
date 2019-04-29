@@ -6,12 +6,17 @@
 
 package io.debezium.connector.postgresql;
 
+import java.nio.charset.Charset;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+import io.debezium.connector.postgresql.spi.Snapshotter;
+import io.debezium.connector.postgresql.spi.SlotState;
+import io.debezium.relational.TableId;
+import io.debezium.schema.TopicSelector;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
@@ -22,8 +27,6 @@ import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
-import io.debezium.relational.TableId;
-import io.debezium.schema.TopicSelector;
 import io.debezium.util.LoggingContext;
 
 /**
@@ -39,7 +42,12 @@ public class PostgresConnectorTask extends BaseSourceTask {
 
     private PostgresTaskContext taskContext;
     private RecordsProducer producer;
-    private volatile long lastProcessedLsn;
+
+    /**
+     * In case of wal2json, all records of one TX will be sent with the same LSN. This is the last LSN that was
+     * completely processed, i.e. we've seen all events originating from that TX.
+     */
+    private volatile Long lastCompletelyProcessedLsn;
 
     /**
      * A queue with change events filled by the snapshot and streaming producers, consumed
@@ -56,15 +64,23 @@ public class PostgresConnectorTask extends BaseSourceTask {
 
         PostgresConnectorConfig connectorConfig = new PostgresConnectorConfig(config);
 
-        // Create type registry
         TypeRegistry typeRegistry;
+        Charset databaseCharset;
+
         try (final PostgresConnection connection = new PostgresConnection(connectorConfig.jdbcConfig())) {
             typeRegistry = connection.getTypeRegistry();
+            databaseCharset = connection.getDatabaseCharset();
+        }
+
+        Snapshotter snapshotter = connectorConfig.getSnapshotter();
+        if (snapshotter == null) {
+            logger.error("Unable to load snapshotter, if using custom snapshot mode, double check your settings");
+            throw new ConnectException("Unable to load snapshotter, if using custom snapshot mode, double check your settings");
         }
 
         // create the task context and schema...
         TopicSelector<TableId> topicSelector = PostgresTopicSelector.create(connectorConfig);
-        PostgresSchema schema = new PostgresSchema(connectorConfig, typeRegistry, topicSelector);
+        PostgresSchema schema = new PostgresSchema(connectorConfig, typeRegistry, databaseCharset, topicSelector);
         this.taskContext = new PostgresTaskContext(connectorConfig, schema, topicSelector);
 
         SourceInfo sourceInfo = new SourceInfo(connectorConfig.getLogicalName(), connectorConfig.databaseName());
@@ -72,41 +88,29 @@ public class PostgresConnectorTask extends BaseSourceTask {
         LoggingContext.PreviousContext previousContext = taskContext.configureLoggingContext(CONTEXT_NAME);
         try {
             //Print out the server information
+            SlotState slotInfo = null;
             try (PostgresConnection connection = taskContext.createConnection()) {
-                logger.info(connection.serverInfo().toString());
+                if (logger.isInfoEnabled()) {
+                    logger.info(connection.serverInfo().toString());
+                }
+                slotInfo = connection.getReplicationSlotInfo(connectorConfig.slotName(), connectorConfig.plugin().getPostgresPluginName());
+            }
+            catch (SQLException e) {
+                logger.warn("unable to load info of replication slot, debezium will try to create the slot");
             }
 
             if (existingOffset == null) {
                 logger.info("No previous offset found");
-                if (connectorConfig.snapshotNeverAllowed()) {
-                    logger.info("Snapshots are not allowed as per configuration, starting streaming logical changes only");
-                    producer = new RecordsStreamProducer(taskContext, sourceInfo);
-                } else {
-                    // otherwise we always want to take a snapshot at startup
-                    createSnapshotProducer(taskContext, sourceInfo, connectorConfig.initialOnlySnapshot());
-                }
-            } else {
-                sourceInfo.load(existingOffset);
-                logger.info("Found previous offset {}", sourceInfo);
-                if (sourceInfo.isSnapshotInEffect()) {
-                    if (connectorConfig.snapshotNeverAllowed()) {
-                        // No snapshots are allowed
-                        String msg = "The connector previously stopped while taking a snapshot, but now the connector is configured "
-                                     + "to never allow snapshots. Reconfigure the connector to use snapshots initially or when needed.";
-                        throw new ConnectException(msg);
-                    } else {
-                        logger.info("Found previous incomplete snapshot");
-                        createSnapshotProducer(taskContext, sourceInfo, connectorConfig.initialOnlySnapshot());
-                    }
-                } else if (connectorConfig.alwaysTakeSnapshot()) {
-                    logger.info("Taking a new snapshot as per configuration");
-                    producer = new RecordsSnapshotProducer(taskContext, sourceInfo, true);
-                } else {
-                    logger.info(
-                            "Previous snapshot has completed successfully, streaming logical changes from last known position");
-                    producer = new RecordsStreamProducer(taskContext, sourceInfo);
-                }
+                // if we have no initial offset, indicate that to Snapshotter by passing null
+                snapshotter.init(connectorConfig, null, slotInfo);
             }
+            else {
+                logger.info("Found previous offset {}", sourceInfo);
+                sourceInfo.load(existingOffset);
+                snapshotter.init(connectorConfig, sourceInfo.asOffsetState(), slotInfo);
+            }
+
+            createRecordProducer(taskContext, sourceInfo, snapshotter);
 
             changeEventQueue = new ChangeEventQueue.Builder<ChangeEvent>()
                 .pollInterval(connectorConfig.getPollInterval())
@@ -117,27 +121,38 @@ public class PostgresConnectorTask extends BaseSourceTask {
 
             producer.start(changeEventQueue::enqueue, changeEventQueue::producerFailure);
             running.compareAndSet(false, true);
-        }  catch (SQLException e) {
-            throw new ConnectException(e);
-        } finally {
+        }
+        finally {
             previousContext.restore();
         }
     }
 
-    private void createSnapshotProducer(PostgresTaskContext taskContext, SourceInfo sourceInfo, boolean initialOnlySnapshot) {
-        if (initialOnlySnapshot) {
-            logger.info("Taking only a snapshot of the DB without streaming any changes afterwards...");
-            producer = new RecordsSnapshotProducer(taskContext, sourceInfo, false);
-        } else {
-            logger.info("Taking a new snapshot of the DB and streaming logical changes once the snapshot is finished...");
-            producer = new RecordsSnapshotProducer(taskContext, sourceInfo, true);
+    private void createRecordProducer(PostgresTaskContext taskContext, SourceInfo sourceInfo, Snapshotter snapshotter) {
+        if (snapshotter.shouldSnapshot()) {
+            if (snapshotter.shouldStream()) {
+                logger.info("Taking a new snapshot of the DB and streaming logical changes once the snapshot is finished...");
+                producer = new RecordsSnapshotProducer(taskContext, sourceInfo, snapshotter);
+            }
+            else {
+                logger.info("Taking only a snapshot of the DB without streaming any changes afterwards...");
+                producer = new RecordsSnapshotProducer(taskContext, sourceInfo, snapshotter);
+            }
+        }
+        else if (snapshotter.shouldStream()) {
+            logger.info("Not attempting to take a snapshot, immediately starting to stream logical changes...");
+            producer = new RecordsStreamProducer(taskContext, sourceInfo);
+        }
+        else {
+            throw new ConnectException("Snapshotter neither is snapshotting or streaming, invalid!");
         }
     }
 
     @Override
     public void commit() throws InterruptedException {
         if (running.get()) {
-            producer.commit(lastProcessedLsn);
+            if (lastCompletelyProcessedLsn != null) {
+                producer.commit(lastCompletelyProcessedLsn);
+            }
         }
     }
 
@@ -146,14 +161,7 @@ public class PostgresConnectorTask extends BaseSourceTask {
         List<ChangeEvent> events = changeEventQueue.poll();
 
         if (events.size() > 0) {
-            for (int i = events.size() - 1; i >= 0; i--) {
-                SourceRecord r = events.get(i).getRecord();
-                if (events.get(i).isLastOfLsn()) {
-                    Map<String, ?> offset = r.sourceOffset();
-                    lastProcessedLsn = (Long)offset.get(SourceInfo.LSN_KEY);
-                    break;
-                }
-            }
+            lastCompletelyProcessedLsn = events.get(events.size() - 1).getLastCompletelyProcessedLsn();
         }
         return events.stream().map(ChangeEvent::getRecord).collect(Collectors.toList());
     }

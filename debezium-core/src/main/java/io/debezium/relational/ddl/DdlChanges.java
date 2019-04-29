@@ -63,7 +63,7 @@ public class DdlChanges implements DdlParserListener {
      * @param consumer the consumer
      */
     public void groupStatementStringsByDatabase(DatabaseStatementStringConsumer consumer) {
-        groupEventsByDatabase((DatabaseEventConsumer)(dbName,eventList)->{
+        groupEventsByDatabase((DatabaseEventConsumer) (dbName, eventList) -> {
             StringBuilder statements = new StringBuilder();
             eventList.forEach(event->{
                 statements.append(event.statement());
@@ -79,7 +79,7 @@ public class DdlChanges implements DdlParserListener {
      * @param consumer the consumer
      */
     public void groupStatementsByDatabase(DatabaseStatementConsumer consumer) {
-        groupEventsByDatabase((DatabaseEventConsumer)(dbName,eventList)->{
+        groupEventsByDatabase((DatabaseEventConsumer) (dbName, eventList) -> {
             List<String> statements = new ArrayList<>();
             eventList.forEach(event->statements.add(event.statement()));
             consumer.consume(dbName, statements);
@@ -92,7 +92,9 @@ public class DdlChanges implements DdlParserListener {
      * @param consumer the consumer
      */
     public void groupEventsByDatabase(DatabaseEventConsumer consumer) {
-        if ( isEmpty() ) return;
+        if ( isEmpty() ) {
+            return;
+        }
         if ( databaseNames.size() <= 1 ) {
             consumer.consume(databaseNames.iterator().next(), events);
             return;

@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.mongodb;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -35,10 +36,14 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
 
 import io.debezium.annotation.ThreadSafe;
+import io.debezium.config.CommonConnectorConfig;
+import io.debezium.config.ConfigurationDefaults;
+import io.debezium.connector.mongodb.MongoDbConnectorConfig.SnapshotMode;
 import io.debezium.connector.mongodb.RecordMakers.RecordsForCollection;
 import io.debezium.function.BlockingConsumer;
 import io.debezium.function.BufferedBlockingConsumer;
 import io.debezium.util.Clock;
+import io.debezium.util.Metronome;
 import io.debezium.util.Strings;
 import io.debezium.util.Threads;
 
@@ -142,8 +147,11 @@ public class Replicator {
                 if (establishConnectionToPrimary()) {
                     if (isInitialSyncExpected()) {
                         recordCurrentOplogPosition();
-                        if (!performInitialSync()) {
-                            return;
+                        if (context.getConnectorConfig().getSnapshotMode() == SnapshotMode.INITIAL) {
+                            boolean snapshotCompleted = performInitialSync();
+                            if (!snapshotCompleted) {
+                                return;
+                            }
                         }
                     }
                     readOplog();
@@ -206,7 +214,9 @@ public class Replicator {
     protected boolean isInitialSyncExpected() {
         boolean performSnapshot = true;
         if (source.hasOffset(rsName)) {
-            logger.info("Found existing offset for replica set '{}' at {}", rsName, source.lastOffset(rsName));
+            if (logger.isInfoEnabled()) {
+                logger.info("Found existing offset for replica set '{}' at {}", rsName, source.lastOffset(rsName));
+            }
             performSnapshot = false;
             if (context.getConnectionContext().performSnapshotEvenIfNotNeeded()) {
                 logger.info("Configured to performing initial sync of replica set '{}'", rsName);
@@ -255,7 +265,17 @@ public class Replicator {
      * @return {@code true} if the initial sync was completed, or {@code false} if it was stopped for any reason
      */
     protected boolean performInitialSync() {
-        logger.info("Beginning initial sync of '{}' at {}", rsName, source.lastOffset(rsName));
+        try {
+            delaySnapshotIfNeeded();
+        }
+        catch (InterruptedException e) {
+            logger.info("Interrupted while awaiting initial snapshot delay");
+            return false;
+        }
+
+        if (logger.isInfoEnabled()) {
+            logger.info("Beginning initial sync of '{}' at {}", rsName, source.lastOffset(rsName));
+        }
         source.startInitialSync(replicaSet.replicaSetName());
 
         // Set up our recorder to buffer the last record ...
@@ -281,8 +301,10 @@ public class Replicator {
         final AtomicLong numDocumentsCopied = new AtomicLong();
 
         // And start threads to pull collection IDs from the queue and perform the copies ...
-        logger.info("Preparing to use {} thread(s) to sync {} collection(s): {}",
-                    numThreads, collections.size(), Strings.join(", ", collections));
+        if (logger.isInfoEnabled()) {
+            logger.info("Preparing to use {} thread(s) to sync {} collection(s): {}",
+                        numThreads, collections.size(), Strings.join(", ", collections));
+        }
         for (int i = 0; i != numThreads; ++i) {
             copyThreads.submit(() -> {
                 context.configureLoggingContext(replicaSet.replicaSetName() + "-sync" + replicatorThreadCounter.incrementAndGet());
@@ -295,8 +317,10 @@ public class Replicator {
                         long numDocs = copyCollection(id, syncStart);
                         numCollectionsCopied.incrementAndGet();
                         numDocumentsCopied.addAndGet(numDocs);
-                        long duration = clock.currentTimeInMillis() - start;
-                        logger.info("Completing initial sync of {} documents from '{}' in {}", numDocs, id, Strings.duration(duration));
+                        if (logger.isInfoEnabled()) {
+                            long duration = clock.currentTimeInMillis() - start;
+                            logger.info("Completing initial sync of {} documents from '{}' in {}", numDocs, id, Strings.duration(duration));
+                        }
                     }
                 } catch (InterruptedException e) {
                     // Do nothing so that this thread is terminated ...
@@ -320,9 +344,11 @@ public class Replicator {
         // Therefore, check the aborted state here ...
         long syncDuration = clock.currentTimeInMillis() - syncStart;
         if (aborted.get()) {
-            int remaining = collections.size() - numCollectionsCopied.get();
-            logger.info("Initial sync aborted after {} with {} of {} collections incomplete",
-                        Strings.duration(syncDuration), remaining, collections.size());
+            if (logger.isInfoEnabled()) {
+                int remaining = collections.size() - numCollectionsCopied.get();
+                logger.info("Initial sync aborted after {} with {} of {} collections incomplete",
+                            Strings.duration(syncDuration), remaining, collections.size());
+            }
             return false;
         }
 
@@ -336,9 +362,30 @@ public class Replicator {
             return false;
         }
 
-        logger.info("Initial sync of {} collections with a total of {} documents completed in {}",
-                    collections.size(), numDocumentsCopied.get(), Strings.duration(syncDuration));
+        if (logger.isInfoEnabled()) {
+            logger.info("Initial sync of {} collections with a total of {} documents completed in {}",
+                        collections.size(), numDocumentsCopied.get(), Strings.duration(syncDuration));
+        }
         return true;
+    }
+
+    private void delaySnapshotIfNeeded() throws InterruptedException {
+        Duration delay = Duration.ofMillis(context.getConnectionContext().config.getLong(CommonConnectorConfig.SNAPSHOT_DELAY_MS));
+        if (delay.isZero() || delay.isNegative()) {
+            return;
+        }
+
+        Threads.Timer timer = Threads.timer(Clock.SYSTEM, delay);
+        Metronome metronome = Metronome.parker(ConfigurationDefaults.RETURN_CONTROL_INTERVAL, Clock.SYSTEM);
+
+        while(!timer.expired()) {
+            if (!running.get()) {
+                throw new InterruptedException("Interrupted while awaiting initial snapshot delay");
+            }
+
+            logger.info("The connector will wait for {}s before proceeding", timer.remaining().getSeconds());
+            metronome.pause();
+        }
     }
 
     /**
@@ -388,7 +435,7 @@ public class Replicator {
      * is elected (as identified by an oplog event), of if the current thread doing the reading is interrupted.
      */
     protected void readOplog() {
-        primaryClient.execute("read from oplog on '" + replicaSet + "'", (Consumer<MongoClient>)this::readOplog);
+        primaryClient.execute("read from oplog on '" + replicaSet + "'", (Consumer<MongoClient>) this :: readOplog);
     }
 
     /**
@@ -398,7 +445,8 @@ public class Replicator {
      */
     protected void readOplog(MongoClient primary) {
         BsonTimestamp oplogStart = source.lastOffsetTimestamp(replicaSet.replicaSetName());
-        logger.info("Reading oplog for '{}' primary {} starting at {}", replicaSet, primary.getAddress(), oplogStart);
+        ServerAddress primaryAddress = primary.getAddress();
+        logger.info("Reading oplog for '{}' primary {} starting at {}", replicaSet, primaryAddress, oplogStart);
 
         // Include none of the cluster-internal operations and only those events since the previous timestamp ...
         MongoCollection<Document> oplog = primary.getDatabase("local").getCollection("oplog.rs");
@@ -409,7 +457,6 @@ public class Replicator {
                                               .oplogReplay(true) // tells Mongo to not rely on indexes
                                               .cursorType(CursorType.TailableAwait); // tail and await new data
         // Read as much of the oplog as we can ...
-        ServerAddress primaryAddress = primary.getAddress();
         try (MongoCursor<Document> cursor = results.iterator()) {
             while (running.get() && cursor.hasNext()) {
                 if (!handleOplogEvent(primaryAddress, cursor.next())) {
@@ -433,7 +480,9 @@ public class Replicator {
         String ns = event.getString("ns");
         Document object = event.get("o", Document.class);
         if (object == null) {
-            logger.warn("Missing 'o' field in event, so skipping {}", event.toJson());
+            if (logger.isWarnEnabled()) {
+                logger.warn("Missing 'o' field in event, so skipping {}", event.toJson());
+            }
             return true;
         }
         if (ns == null || ns.isEmpty()) {
@@ -451,18 +500,19 @@ public class Replicator {
                 }
                 ServerAddress serverAddress = address.get();
 
+                //primary switch will be handled automatically by MongoDB driver
                 if (serverAddress != null && !serverAddress.equals(primaryAddress)) {
-                    logger.info("Found new primary event in oplog, so stopping use of {} to continue with new primary",
-                            primaryAddress);
-                    // There is a new primary, so stop using this server and instead use the new primary ...
-                    return false;
+                    logger.info("Found new primary event in oplog, so stopping use of {} to continue with new primary {}",
+                            primaryAddress, serverAddress);
                 } else {
                     logger.info("Found new primary event in oplog, current {} is new primary. " +
                                 "Continue to process oplog event.", primaryAddress);
                 }
             }
             // Otherwise, ignore this event ...
-            logger.debug("Skipping event with no namespace: {}", event.toJson());
+            if (logger.isDebugEnabled()) {
+                logger.debug("Skipping event with no namespace: {}", event.toJson());
+            }
             return true;
         }
         int delimIndex = ns.indexOf('.');
@@ -477,8 +527,8 @@ public class Replicator {
                 return true;
             }
             // Otherwise, it is an event on a document in a collection ...
-            if (!context.filters().databaseFilter().test(dbName)){
-                logger.debug("Skipping the event for database {} based on database.whitelist");
+            if (!context.filters().databaseFilter().test(dbName)) {
+                logger.debug("Skipping the event for database {} based on database.whitelist", dbName);
                 return true;
             }
             CollectionId collectionId = new CollectionId(rsName, dbName, collectionName);
@@ -532,7 +582,9 @@ public class Replicator {
         protected synchronized void stopBuffering(Map<String, ?> newOffset) throws InterruptedException {
             assert newOffset != null;
             this.buffered.close(record -> {
-                if (record == null) return null;
+                if (record == null) {
+                    return null;
+                }
                 return new SourceRecord(record.sourcePartition(),
                         newOffset,
                         record.topic(),

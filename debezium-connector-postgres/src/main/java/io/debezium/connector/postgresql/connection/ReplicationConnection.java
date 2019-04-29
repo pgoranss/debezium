@@ -37,7 +37,7 @@ public interface ReplicationConnection extends AutoCloseable {
      * @return a {@link PGReplicationStream} from which data is read; never null
      * @throws SQLException if there is a problem obtaining the replication stream
      */
-    ReplicationStream startStreaming() throws SQLException;
+    ReplicationStream startStreaming() throws SQLException, InterruptedException;
 
     /**
      * Opens a stream for reading logical replication changes from a given LSN position.
@@ -52,7 +52,7 @@ public interface ReplicationConnection extends AutoCloseable {
      * @see org.postgresql.replication.LogSequenceNumber
      * @throws SQLException if anything fails
      */
-    ReplicationStream startStreaming(Long offset) throws SQLException;
+    ReplicationStream startStreaming(Long offset) throws SQLException, InterruptedException;
 
     /**
      * Checks whether this connection is open or not
@@ -128,6 +128,16 @@ public interface ReplicationConnection extends AutoCloseable {
         Builder statusUpdateIntervalMillis(final Integer statusUpdateIntervalMillis);
 
         Builder withTypeRegistry(TypeRegistry typeRegistry);
+
+        /**
+         * Optional parameters to pass to the logical decoder when the stream starts.
+         *
+         * @param streamParams String of key and value pairs declared with "=". Pairs are separated by ";".
+         *                     Example: "add-tables=public.table,public.table2;include-lsn=true"
+         * @return this instance
+         * @see #STREAM_PARAMS
+         */
+        Builder streamParams(final String streamParams);
 
         /**
          * Creates a new {@link ReplicationConnection} instance

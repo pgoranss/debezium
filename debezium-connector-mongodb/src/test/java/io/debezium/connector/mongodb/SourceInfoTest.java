@@ -17,8 +17,6 @@ import org.bson.Document;
 import org.junit.Before;
 import org.junit.Test;
 
-import io.debezium.connector.AbstractSourceInfo;
-
 /**
  * @author Randall Hauch
  *
@@ -78,7 +76,7 @@ public class SourceInfoTest {
         assertThat(offset.get(SourceInfo.OPERATION_ID)).isEqualTo(1987654321L);
 
         // Create a new source info and set the offset ...
-        Map<String,String> partition = source.partition(REPLICA_SET_NAME);
+        Map<String, String> partition = source.partition(REPLICA_SET_NAME);
         source = new SourceInfo("serverX");
         source.setOffsetFor(partition, offset);
         
@@ -91,7 +89,7 @@ public class SourceInfoTest {
         assertThat(ts.getTime()).isEqualTo(100);
         assertThat(ts.getInc()).isEqualTo(2);
 
-        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME,new CollectionId(REPLICA_SET_NAME,"dbA","collectA"));
+        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME, new CollectionId(REPLICA_SET_NAME, "dbA", "collectA"));
         assertThat(struct.getInt32(SourceInfo.TIMESTAMP)).isEqualTo(100);
         assertThat(struct.getInt32(SourceInfo.ORDER)).isEqualTo(2);
         assertThat(struct.getInt64(SourceInfo.OPERATION_ID)).isEqualTo(1987654321L);
@@ -114,7 +112,7 @@ public class SourceInfoTest {
         assertThat(ts.getTime()).isEqualTo(0);
         assertThat(ts.getInc()).isEqualTo(0);
 
-        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME,new CollectionId(REPLICA_SET_NAME,"dbA","collectA"));
+        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME, new CollectionId(REPLICA_SET_NAME, "dbA", "collectA"));
         assertThat(struct.getInt32(SourceInfo.TIMESTAMP)).isEqualTo(0);
         assertThat(struct.getInt32(SourceInfo.ORDER)).isEqualTo(0);
         assertThat(struct.getInt64(SourceInfo.OPERATION_ID)).isNull();
@@ -145,7 +143,7 @@ public class SourceInfoTest {
         assertThat(ts.getTime()).isEqualTo(100);
         assertThat(ts.getInc()).isEqualTo(2);
 
-        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME,new CollectionId(REPLICA_SET_NAME,"dbA","collectA"));
+        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME, new CollectionId(REPLICA_SET_NAME, "dbA", "collectA"));
         assertThat(struct.getInt32(SourceInfo.TIMESTAMP)).isEqualTo(100);
         assertThat(struct.getInt32(SourceInfo.ORDER)).isEqualTo(2);
         assertThat(struct.getInt64(SourceInfo.OPERATION_ID)).isEqualTo(1987654321L);
@@ -169,7 +167,7 @@ public class SourceInfoTest {
         assertThat(ts.getTime()).isEqualTo(0);
         assertThat(ts.getInc()).isEqualTo(0);
 
-        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME,new CollectionId(REPLICA_SET_NAME,"dbA","collectA"));
+        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME, new CollectionId(REPLICA_SET_NAME, "dbA", "collectA"));
         assertThat(struct.getInt32(SourceInfo.TIMESTAMP)).isEqualTo(0);
         assertThat(struct.getInt32(SourceInfo.ORDER)).isEqualTo(0);
         assertThat(struct.getInt64(SourceInfo.OPERATION_ID)).isNull();
@@ -202,7 +200,7 @@ public class SourceInfoTest {
         assertThat(ts.getTime()).isEqualTo(100);
         assertThat(ts.getInc()).isEqualTo(2);
 
-        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME,new CollectionId(REPLICA_SET_NAME,"dbA","collectA"));
+        Struct struct = source.lastOffsetStruct(REPLICA_SET_NAME, new CollectionId(REPLICA_SET_NAME, "dbA", "collectA"));
         assertThat(struct.getInt32(SourceInfo.TIMESTAMP)).isEqualTo(100);
         assertThat(struct.getInt32(SourceInfo.ORDER)).isEqualTo(2);
         assertThat(struct.getInt64(SourceInfo.OPERATION_ID)).isEqualTo(1987654321L);
@@ -214,6 +212,11 @@ public class SourceInfoTest {
 
     @Test
     public void versionIsPresent() {
-        assertThat(source.offsetStructForEvent("rs", null).getString(AbstractSourceInfo.DEBEZIUM_VERSION_KEY)).isEqualTo(Module.version());
+        assertThat(source.offsetStructForEvent("rs", null).getString(SourceInfo.DEBEZIUM_VERSION_KEY)).isEqualTo(Module.version());
+    }
+
+    @Test
+    public void connectorIsPresent() {
+        assertThat(source.offsetStructForEvent("rs", null).getString(SourceInfo.DEBEZIUM_CONNECTOR_KEY)).isEqualTo(Module.name());
     }
 }

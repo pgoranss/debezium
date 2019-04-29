@@ -5,28 +5,31 @@
  */
 package io.debezium.util;
 
+import static org.fest.assertions.Assertions.assertThat;
+
 import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import org.junit.Test;
 
-import static org.fest.assertions.Assertions.assertThat;
-
 public class TestingTest implements Testing {
-    
+
     @Test
-    public void shouldKnowDirectoriesInsideTarget() {
-        assertThat(Testing.Files.inTargetDir(new File("target/classes").toPath())).isTrue();
-        assertThat(Testing.Files.inTargetDir(new File("../debezium").toPath())).isFalse();
+    public void shouldKnowDirectoriesInsideTestData() {
+        assertThat(Testing.Files.inTestDataDir(Paths.get(Testing.Files.dataDir(), "somefile"))).isTrue();
+        assertThat(Testing.Files.inTestDataDir(new File("../debezium").toPath())).isFalse();
     }
-    
+
     @Test
     public void shouldRemoveDirectory() throws Exception {
-        Path path = Paths.get("target/test-dir");
-        path.toFile().mkdir();
-        Path file = Paths.get("target/test-dir/file.txt");
-        file.toFile().createNewFile();
+        Path path = Paths.get(Testing.Files.dataDir(), "test-dir");
+        assertThat(path.toFile().mkdirs()).isTrue();
+
+        Path file = path.resolve("file.txt");
+        assertThat(file.toFile().createNewFile()).isTrue();
+
         Testing.Files.delete(path);
+        assertThat(java.nio.file.Files.exists(path)).isFalse();
     }
 }

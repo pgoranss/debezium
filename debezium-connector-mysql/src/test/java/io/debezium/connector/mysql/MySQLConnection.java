@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.mysql;
 
+import java.sql.SQLException;
 import java.util.Map;
 
 import io.debezium.config.Configuration;
@@ -18,6 +19,13 @@ import io.debezium.jdbc.JdbcConnection;
  * @author Randall Hauch
  */
 public class MySQLConnection extends JdbcConnection {
+
+    public enum MySqlVersion {
+        MYSQL_5, MYSQL_8;
+    }
+
+    private DatabaseDifferences databaseAsserts;
+    private MySqlVersion mySqlVersion;
 
     /**
      * Obtain a connection instance to the named test database.
@@ -81,5 +89,57 @@ public class MySQLConnection extends JdbcConnection {
      */
     public MySQLConnection(Configuration config) {
         super(config, FACTORY, null, MySQLConnection::addDefaults);
+    }
+
+    public MySqlVersion getMySqlVersion() {
+        if (mySqlVersion == null) {
+            String versionString;
+            try {
+                versionString = connect().queryAndMap("SHOW GLOBAL VARIABLES LIKE 'version'", rs -> {
+                    rs.next();
+                    return rs.getString(2);
+                });
+
+                mySqlVersion = versionString.startsWith("8.") ? MySqlVersion.MYSQL_8 : MySqlVersion.MYSQL_5;
+            }
+            catch (SQLException e) {
+                throw new IllegalStateException("Couldn't obtain MySQL Server version", e);
+            }
+        }
+
+        return mySqlVersion;
+    }
+
+    public DatabaseDifferences databaseAsserts() {
+        if (databaseAsserts == null) {
+            if (getMySqlVersion() == MySqlVersion.MYSQL_8) {
+                databaseAsserts = new DatabaseDifferences() {
+                    @Override
+                    public boolean isCurrentDateTimeDefaultGenerated() {
+                        return true;
+                    }
+
+                    @Override
+                    public String currentDateTimeDefaultOptional(String isoString) {
+                        return null;
+                    }
+                };
+            }
+            else {
+                databaseAsserts = new DatabaseDifferences() {
+                    @Override
+                    public boolean isCurrentDateTimeDefaultGenerated() {
+                        return false;
+                    }
+
+                    @Override
+                    public String currentDateTimeDefaultOptional(String isoString) {
+                        return isoString;
+                    }
+
+                };
+            }
+        }
+        return databaseAsserts;
     }
 }

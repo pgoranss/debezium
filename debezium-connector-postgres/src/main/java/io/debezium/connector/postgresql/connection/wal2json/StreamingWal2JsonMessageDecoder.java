@@ -8,6 +8,7 @@ package io.debezium.connector.postgresql.connection.wal2json;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.Arrays;
 
 import org.apache.kafka.connect.errors.ConnectException;
@@ -20,6 +21,7 @@ import io.debezium.connector.postgresql.connection.MessageDecoder;
 import io.debezium.connector.postgresql.connection.ReplicationStream.ReplicationMessageProcessor;
 import io.debezium.document.Document;
 import io.debezium.document.DocumentReader;
+import io.debezium.time.Conversions;
 
 /**
  * <p>JSON deserialization of a message sent by
@@ -105,7 +107,7 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
 
     private String timestamp;
 
-    private long commitTime;
+    private Instant commitTime;
 
     @Override
     public void processMessage(ByteBuffer buffer, ReplicationMessageProcessor processor, TypeRegistry typeRegistry) throws SQLException, InterruptedException {
@@ -147,7 +149,7 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
                         // Correct initial chunk
                         txId = message.getLong("xid");
                         timestamp = message.getString("timestamp");
-                        commitTime = dateTime.systemTimestamp(timestamp);
+                        commitTime = Conversions.toInstant(dateTime.systemTimestamp(timestamp));
                         messageInProgress = true;
                         currentChunk = null;
                     }
@@ -180,9 +182,7 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
         }
         else if (firstChar == RIGHT_BRACKET) {
             // No more changes
-            if (currentChunk != null) {
-                doProcessMessage(processor, typeRegistry, currentChunk, true);
-            }
+            doProcessMessage(processor, typeRegistry, currentChunk, true);
             messageInProgress = false;
         }
         else {
@@ -198,7 +198,7 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
         }
         txId = UNDEFINED_LONG;
         timestamp = UNDEFINED_STRING;
-        commitTime = UNDEFINED_LONG;
+        commitTime = null;
         messageInProgress = true;
         currentChunk = null;
     }
@@ -236,10 +236,19 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
 
     private void doProcessMessage(ReplicationMessageProcessor processor, TypeRegistry typeRegistry, byte[] content, boolean lastMessage)
             throws IOException, SQLException, InterruptedException {
-        final Document change = DocumentReader.floatNumbersAsTextReader().read(content);
+        if (content != null) {
+            final Document change = DocumentReader.floatNumbersAsTextReader().read(content);
+            LOGGER.trace("Change arrived for decoding {}", change);
+            processor.process(new Wal2JsonReplicationMessage(txId, commitTime, change, containsMetadata, lastMessage, typeRegistry));
+        }
+        else {
+            // If content is null then this is an empty change event that WAL2JSON can generate for events like DDL,
+            // truncate table, materialized views, etc. The transaction still needs to be processed for the heartbeat
+            // to fire.
+            LOGGER.trace("Empty change arrived");
+            processor.process(null);
+        }
 
-        LOGGER.trace("Change arrived for decoding {}", change);
-        processor.process(new Wal2JsonReplicationMessage(txId, commitTime, change, containsMetadata, lastMessage, typeRegistry));
     }
 
     @Override
@@ -255,6 +264,11 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
             .withSlotOption("write-in-chunks", 1)
             .withSlotOption("include-xids", 1)
             .withSlotOption("include-timestamp", 1);
+    }
+
+    @Override
+    public ChainedLogicalStreamBuilder tryOnceOptions(ChainedLogicalStreamBuilder builder) {
+        return builder.withSlotOption("include-unchanged-toast", 0);
     }
 
     @Override

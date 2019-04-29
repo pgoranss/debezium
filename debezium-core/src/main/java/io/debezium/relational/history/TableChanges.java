@@ -45,6 +45,9 @@ public class TableChanges implements Iterable<TableChange> {
             if (change.getType() == TableChangeType.CREATE) {
                 tableChanges.create(change.table);
             }
+            else if (change.getType() == TableChangeType.ALTER) {
+                tableChanges.alter(change.table);
+            }
         }
 
         return tableChanges;
@@ -52,6 +55,11 @@ public class TableChanges implements Iterable<TableChange> {
 
     public TableChanges create(Table table) {
         changes.add(new TableChange(TableChangeType.CREATE, table));
+        return this;
+    }
+
+    public TableChanges alter(Table table) {
+        changes.add(new TableChange(TableChangeType.ALTER, table));
         return this;
     }
 
@@ -79,12 +87,15 @@ public class TableChanges implements Iterable<TableChange> {
 
     @Override
     public boolean equals(Object obj) {
-        if (this == obj)
+        if (this == obj) {
             return true;
-        if (obj == null)
+        }
+        if (obj == null) {
             return false;
-        if (getClass() != obj.getClass())
+        }
+        if (getClass() != obj.getClass()) {
             return false;
+        }
         TableChanges other = (TableChanges) obj;
 
         return changes.equals(other.changes);
@@ -112,7 +123,7 @@ public class TableChanges implements Iterable<TableChange> {
             TableId id = TableId.parse(document.getString("id"));
             Table table = null;
 
-            if (type == TableChangeType.CREATE) {
+            if (type == TableChangeType.CREATE || type == TableChangeType.ALTER) {
                 table = fromDocument(id, document.getDocument("table"));
             }
 
@@ -135,7 +146,7 @@ public class TableChanges implements Iterable<TableChange> {
             Document document = Document.create();
 
             document.setString("type", type.name());
-            document.setString("id", id.toString());
+            document.setString("id", id.toDoubleQuotedString());
             document.setDocument("table", toDocument(table));
             return document;
         }
@@ -152,22 +163,30 @@ public class TableChanges implements Iterable<TableChange> {
 
         @Override
         public boolean equals(Object obj) {
-            if (this == obj)
+            if (this == obj) {
                 return true;
-            if (obj == null)
+            }
+            if (obj == null) {
                 return false;
-            if (getClass() != obj.getClass())
+            }
+            if (getClass() != obj.getClass()) {
                 return false;
+            }
             TableChange other = (TableChange) obj;
-            if (!id.equals(other.id))
+            if (! id.equals(other.id)) {
                 return false;
+            }
             if (table == null) {
-                if (other.table != null)
+                if (other.table != null) {
                     return false;
-            } else if (!table.equals(other.table))
+                }
+            }
+            else if (!table.equals(other.table)) {
                 return false;
-            if (type != other.type)
+            }
+            if (type != other.type) {
                 return false;
+            }
             return true;
         }
 

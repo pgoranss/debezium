@@ -5,6 +5,8 @@
  */
 package io.debezium.connector.mongodb;
 
+import java.util.Collections;
+
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.common.CdcSourceTaskContext;
@@ -13,7 +15,6 @@ import io.debezium.schema.TopicSelector;
 
 /**
  * @author Randall Hauch
- *
  */
 public class MongoDbTaskContext extends CdcSourceTaskContext {
 
@@ -23,12 +24,13 @@ public class MongoDbTaskContext extends CdcSourceTaskContext {
     private final boolean emitTombstoneOnDelete;
     private final String serverName;
     private final ConnectionContext connectionContext;
+    private final MongoDbConnectorConfig connectorConfig;
 
     /**
      * @param config the configuration
      */
     public MongoDbTaskContext(Configuration config) {
-        super("MongoDB", config.getString(MongoDbConnectorConfig.LOGICAL_NAME));
+        super("MongoDB", config.getString(MongoDbConnectorConfig.LOGICAL_NAME), Collections::emptySet);
 
         final String serverName = config.getString(MongoDbConnectorConfig.LOGICAL_NAME);
         this.filters = new Filters(config);
@@ -37,6 +39,7 @@ public class MongoDbTaskContext extends CdcSourceTaskContext {
         this.emitTombstoneOnDelete = config.getBoolean(CommonConnectorConfig.TOMBSTONES_ON_DELETE);
         this.serverName = config.getString(MongoDbConnectorConfig.LOGICAL_NAME);
         this.connectionContext = new ConnectionContext(config);
+        this.connectorConfig = new MongoDbConnectorConfig(config);
     }
 
     public TopicSelector<CollectionId> topicSelector() {
@@ -61,5 +64,9 @@ public class MongoDbTaskContext extends CdcSourceTaskContext {
 
     public ConnectionContext getConnectionContext() {
         return connectionContext;
+    }
+
+    public MongoDbConnectorConfig getConnectorConfig() {
+        return this.connectorConfig;
     }
 }

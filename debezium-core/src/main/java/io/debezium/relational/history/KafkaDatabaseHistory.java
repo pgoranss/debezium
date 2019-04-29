@@ -160,8 +160,10 @@ public class KafkaDatabaseHistory extends AbstractDatabaseHistory {
                                     .withDefault(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class)
                                     .withDefault(ProducerConfig.MAX_BLOCK_MS_CONFIG, 10_000) // wait at most this if we can't reach Kafka
                                     .build();
-        logger.info("KafkaDatabaseHistory Consumer config: " + consumerConfig.withMaskedPasswords());
-        logger.info("KafkaDatabaseHistory Producer config: " + producerConfig.withMaskedPasswords());
+        if (logger.isInfoEnabled()) {
+            logger.info("KafkaDatabaseHistory Consumer config: {}", consumerConfig.withMaskedPasswords());
+            logger.info("KafkaDatabaseHistory Producer config: {}", producerConfig.withMaskedPasswords());
+        }
     }
 
     @Override
@@ -335,10 +337,20 @@ public class KafkaDatabaseHistory extends AbstractDatabaseHistory {
         try (AdminClient admin = AdminClient.create(this.producerConfig.asProperties())) {
             // Find default replication factor
             Config brokerConfig = getKafkaBrokerConfig(admin);
-            final short replicationFactor = Short.parseShort(brokerConfig.get(DEFAULT_TOPIC_REPLICATION_FACTOR_PROP_NAME).value());
+            String defaultReplicationFactorValue = brokerConfig.get(DEFAULT_TOPIC_REPLICATION_FACTOR_PROP_NAME).value();
+            final short replicationFactor;
+            // Ensure that the default replication factor property was returned by the Admin Client
+            if (defaultReplicationFactorValue != null) {
+                replicationFactor = Short.parseShort(defaultReplicationFactorValue);
+            }
+            else {
+                // Otherwise warn that no property was obtained and default it to 1 - users can increase this later if desired
+                logger.warn("Unable to obtain the default replication factor from the brokers at {} - Setting value to 1 instead", producerConfig.getString(BOOTSTRAP_SERVERS));
+                replicationFactor = 1;
+            }
 
             // Create topic
-            final NewTopic topic = new NewTopic(topicName, (short)1, replicationFactor);
+            final NewTopic topic = new NewTopic(topicName, (short) 1, replicationFactor);
             topic.configs(Collect.hashMapOf("cleanup.policy", "delete", "retention.ms", Long.toString(Long.MAX_VALUE), "retention.bytes", "-1"));
             admin.createTopics(Collections.singleton(topic));
 

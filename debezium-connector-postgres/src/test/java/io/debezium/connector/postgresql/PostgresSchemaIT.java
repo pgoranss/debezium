@@ -7,9 +7,11 @@
 package io.debezium.connector.postgresql;
 
 import static io.debezium.connector.postgresql.PostgresConnectorConfig.SCHEMA_BLACKLIST;
+import static io.debezium.connector.postgresql.junit.SkipWhenDatabaseVersionLessThan.PostgresVersion.POSTGRES_10;
 import static org.fest.assertions.Assertions.assertThat;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import java.sql.SQLException;
 import java.util.Arrays;
@@ -20,9 +22,13 @@ import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestRule;
 
 import io.debezium.connector.postgresql.connection.PostgresConnection;
+import io.debezium.connector.postgresql.junit.SkipTestDependingOnDatabaseVersionRule;
+import io.debezium.connector.postgresql.junit.SkipWhenDatabaseVersionLessThan;
 import io.debezium.data.Bits;
 import io.debezium.data.Json;
 import io.debezium.data.Uuid;
@@ -32,6 +38,7 @@ import io.debezium.data.Xml;
 import io.debezium.data.geometry.Geography;
 import io.debezium.data.geometry.Geometry;
 import io.debezium.data.geometry.Point;
+import io.debezium.doc.FixFor;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.relational.TableSchema;
@@ -51,9 +58,13 @@ import io.debezium.util.Strings;
  */
 public class PostgresSchemaIT {
 
+    @Rule
+    public final TestRule skip = new SkipTestDependingOnDatabaseVersionRule();
+
     private static final String[] TEST_TABLES = new String[] { "public.numeric_table", "public.numeric_decimal_table", "public.string_table",
-                                                               "public.cash_table","public.bitbin_table",
-                                                               "public.time_table", "public.text_table", "public.geom_table", "public.tstzrange_table",
+                                                               "public.cash_table", "public.bitbin_table", "public.network_address_table",
+                                                               "public.cidr_network_address_table", "public.macaddr_table",
+                                                               "public.time_table", "public.text_table", "public.geom_table", "public.range_table",
                                                                "public.array_table", "\"Quoted_\"\" . Schema\".\"Quoted_\"\" . Table\"",
                                                                "public.custom_table"
                                                              };
@@ -70,7 +81,7 @@ public class PostgresSchemaIT {
         TestHelper.executeDDL("postgres_create_tables.ddl");
 
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig().build());
-        schema = new PostgresSchema(config, TestHelper.getTypeRegistry(), PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config);
 
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
@@ -87,10 +98,13 @@ public class PostgresSchemaIT {
                     Decimal.builder(0).parameter(TestHelper.PRECISION_PARAMETER_KEY, "4").optional().build(),
                     VariableScaleDecimal.builder().optional().build()
             );
-            assertTableSchema("public.string_table", "vc, vcv, ch, c, t",
+            assertTableSchema("public.string_table", "vc, vcv, ch, c, t, ct",
                               Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA,
-                              Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA);
-            assertTableSchema("public.cash_table", "csh", Decimal.builder(0).optional().build());
+                              Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA);
+            assertTableSchema("public.network_address_table", "i", Schema.OPTIONAL_STRING_SCHEMA);
+            assertTableSchema("public.cidr_network_address_table", "i", Schema.OPTIONAL_STRING_SCHEMA);
+            assertTableSchema("public.macaddr_table", "m", Schema.OPTIONAL_STRING_SCHEMA);
+            assertTableSchema("public.cash_table", "csh", Decimal.builder(2).optional().build());
             assertTableSchema("public.bitbin_table", "ba, bol, bs, bv",
                               Schema.OPTIONAL_BYTES_SCHEMA, Schema.OPTIONAL_BOOLEAN_SCHEMA, Bits.builder(2).optional().build(),
                               Bits.builder(2).optional().build());
@@ -102,8 +116,12 @@ public class PostgresSchemaIT {
                               Json.builder().optional().build(), Json.builder().optional().build(), Xml.builder().optional().build(),
                               Uuid.builder().optional().build());
             assertTableSchema("public.geom_table", "p", Point.builder().optional().build());
-            assertTableSchema("public.tstzrange_table", "unbounded_exclusive_range, bounded_inclusive_range",
-                              Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA);
+            assertTableSchema("public.range_table", "unbounded_exclusive_tsrange, bounded_inclusive_tsrange," +
+                            "unbounded_exclusive_tstzrange, bounded_inclusive_tstzrange," +
+                            "unbounded_exclusive_daterange, bounded_exclusive_daterange, int4_number_range, numerange, int8_number_range",
+                    Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA,
+                    Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA,
+                    Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA);
             assertTableSchema("public.array_table", "int_array, bigint_array, text_array",
                               SchemaBuilder.array(Schema.OPTIONAL_INT32_SCHEMA).optional().build(), SchemaBuilder.array(Schema.OPTIONAL_INT64_SCHEMA).optional().build(),
                               SchemaBuilder.array(Schema.OPTIONAL_STRING_SCHEMA).optional().build());
@@ -116,19 +134,39 @@ public class PostgresSchemaIT {
     }
 
     @Test
+    // MACADDR8 Postgres type is only supported since Postgres version 10
+    @SkipWhenDatabaseVersionLessThan(POSTGRES_10)
+    @FixFor("DBZ-1193")
+    public void shouldLoadSchemaForMacaddr8PostgresType() throws Exception {
+        String tableId = "public.macaddr8_table";
+        String ddl = "CREATE TABLE macaddr8_table (pk SERIAL, m MACADDR8, PRIMARY KEY(pk));";
+
+        TestHelper.execute(ddl);
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig().build());
+        schema = TestHelper.getSchema(config);
+
+        try (PostgresConnection connection = TestHelper.create()) {
+            schema.refresh(connection, false);
+            assertTablesIncluded(tableId);
+            assertKeySchema(tableId, "pk", Schema.INT32_SCHEMA);
+            assertTableSchema(tableId, "m", Schema.OPTIONAL_STRING_SCHEMA);
+        }
+    }
+
+    @Test
     public void shouldLoadSchemaForExtensionPostgresTypes() throws Exception {
         TestHelper.executeDDL("postgres_create_tables.ddl");
         PostgresConnectorConfig config = new PostgresConnectorConfig(
                 TestHelper.defaultConfig().with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true).build()
         );
 
-        schema = new PostgresSchema(config, TestHelper.getTypeRegistry(), PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config);
 
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertTablesIncluded(TEST_TABLES);
-            assertTableSchema("public.custom_table", "lt, i, ct",
-                    Schema.OPTIONAL_BYTES_SCHEMA, Schema.OPTIONAL_BYTES_SCHEMA, Schema.OPTIONAL_STRING_SCHEMA);
+            assertTableSchema("public.custom_table", "lt, i",
+                    Schema.OPTIONAL_BYTES_SCHEMA, Schema.BYTES_SCHEMA);
         }
     }
 
@@ -137,7 +175,7 @@ public class PostgresSchemaIT {
         TestHelper.executeDDL("init_postgis.ddl");
         TestHelper.executeDDL("postgis_create_tables.ddl");
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig().build());
-        schema = new PostgresSchema(config, TestHelper.getTypeRegistry(), PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config);
 
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
@@ -165,7 +203,7 @@ public class PostgresSchemaIT {
         TestHelper.execute(statements);
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig().with(SCHEMA_BLACKLIST, "s1").build());
         final TypeRegistry typeRegistry = TestHelper.getTypeRegistry();
-        schema = new PostgresSchema(config, typeRegistry, PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config, typeRegistry);
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertTablesIncluded("s2.a", "s2.b");
@@ -173,14 +211,14 @@ public class PostgresSchemaIT {
         }
 
         config = new PostgresConnectorConfig(TestHelper.defaultConfig().with(SCHEMA_BLACKLIST, "s.*").build());
-        schema = new PostgresSchema(config, typeRegistry, PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config, typeRegistry);
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertTablesExcluded("s1.a", "s2.a", "s1.b", "s2.b");
         }
 
         config = new PostgresConnectorConfig(TestHelper.defaultConfig().with(PostgresConnectorConfig.TABLE_BLACKLIST, "s1.A,s2.A").build());
-        schema = new PostgresSchema(config, typeRegistry, PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config, typeRegistry);
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertTablesIncluded("s1.b", "s2.b");
@@ -191,7 +229,7 @@ public class PostgresSchemaIT {
                                                           .with(SCHEMA_BLACKLIST, "s2")
                                                           .with(PostgresConnectorConfig.TABLE_BLACKLIST, "s1.A")
                                                           .build());
-        schema = new PostgresSchema(config, typeRegistry, PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config, typeRegistry);
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertTablesIncluded("s1.b");
@@ -199,7 +237,7 @@ public class PostgresSchemaIT {
         }
         config = new PostgresConnectorConfig(TestHelper.defaultConfig().with(PostgresConnectorConfig.COLUMN_BLACKLIST, ".*aa")
                                                        .build());
-        schema = new PostgresSchema(config, typeRegistry, PostgresTopicSelector.create(config));
+        schema = TestHelper.getSchema(config, typeRegistry);
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertColumnsExcluded("s1.a.aa", "s2.a.aa");
@@ -213,8 +251,7 @@ public class PostgresSchemaIT {
                             "CREATE TABLE table1 (pk SERIAL,  PRIMARY KEY(pk));";
         TestHelper.execute(statements);
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig().build());
-        schema = new PostgresSchema(config, TestHelper.getTypeRegistry(), PostgresTopicSelector.create(config));
-
+        schema = TestHelper.getSchema(config);
         try (PostgresConnection connection = TestHelper.create()) {
             schema.refresh(connection, false);
             assertTablesIncluded("public.table1");
@@ -237,12 +274,41 @@ public class PostgresSchemaIT {
 
         TestHelper.execute(statements);
         try (PostgresConnection connection = TestHelper.create()) {
-            schema.refresh(connection, TableId.parse(tableId, false));
+            schema.refresh(connection, TableId.parse(tableId, false), false);
             assertTablesIncluded(tableId);
             assertTablesExcluded("public.table1");
             assertTableSchema(tableId, "vc, si",
-                              Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_INT16_SCHEMA);
+                    Schema.OPTIONAL_STRING_SCHEMA, Schema.OPTIONAL_INT16_SCHEMA);
             assertColumnsExcluded(tableId + ".strcol");
+        }
+    }
+
+    @Test
+    public void shouldPopulateToastableColumnsCache() throws Exception {
+        String statements = "CREATE SCHEMA IF NOT EXISTS public;" +
+                "DROP TABLE IF EXISTS table1;" +
+                "CREATE TABLE table1 (pk SERIAL,  toasted text, untoasted int, PRIMARY KEY(pk));";
+        TestHelper.execute(statements);
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig().build());
+        schema = TestHelper.getSchema(config);
+        TableId tableId = TableId.parse("public.table1", false);
+
+        // Before refreshing, we should have an empty array for the table
+        assertTrue(schema.getToastableColumnsForTableId(tableId).isEmpty());
+
+        try (PostgresConnection connection = TestHelper.create()) {
+            // Load up initial schema info. This should not populate the toastable columns cache, as the cache is loaded
+            // on-demand per-table refresh.
+            schema.refresh(connection, false);
+            assertTrue(schema.getToastableColumnsForTableId(tableId).isEmpty());
+
+            // After refreshing w/ toastable column refresh disabled, we should still have an empty array
+            schema.refresh(connection, tableId, false);
+            assertTrue(schema.getToastableColumnsForTableId(tableId).isEmpty());
+
+            // After refreshing w/ toastable column refresh enabled, we should have only the 'toasted' column in the cache
+            schema.refresh(connection, tableId, true);
+            assertThat(schema.getToastableColumnsForTableId(tableId)).containsOnly("toasted");
         }
     }
 

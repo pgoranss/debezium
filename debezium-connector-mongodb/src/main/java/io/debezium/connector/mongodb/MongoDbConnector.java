@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.mongodb;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -118,21 +119,21 @@ public class MongoDbConnector extends SourceConnector {
             // Set up and start the thread that monitors the members of all of the replica sets ...
             replicaSetMonitorExecutor = Threads.newSingleThreadExecutor(MongoDbConnector.class, taskContext.serverName(), "replica-set-monitor");
             ReplicaSetDiscovery monitor = new ReplicaSetDiscovery(taskContext);
-            monitorThread = new ReplicaSetMonitorThread(monitor::getReplicaSets, connectionContext.pollPeriodInSeconds(), TimeUnit.SECONDS,
+            monitorThread = new ReplicaSetMonitorThread(monitor::getReplicaSets, Duration.ofSeconds(connectionContext.pollPeriodInSeconds()),
                     Clock.SYSTEM, () -> taskContext.configureLoggingContext("disc"), this::replicaSetsChanged);
             replicaSetMonitorExecutor.execute(monitorThread);
-            logger.info("Successfully started MongoDB connector, and continuing to discover changes in replica sets", connectionContext.hosts());
+            logger.info("Successfully started MongoDB connector, and continuing to discover changes in replica set(s) at {}", connectionContext.hosts());
         } finally {
             previousLogContext.restore();
         }
     }
 
     protected void replicaSetsChanged(ReplicaSets replicaSets) {
-        logger.info("Requesting task reconfiguration due to new/removed replica set(s) for MongoDB with seeds {}", connectionContext.hosts());
-        logger.info("New replica sets include:");
-        replicaSets.onEachReplicaSet(replicaSet -> {
-            logger.info("  {}", replicaSet);
-        });
+        if (logger.isInfoEnabled()) {
+            logger.info("Requesting task reconfiguration due to new/removed replica set(s) for MongoDB with seeds {}", connectionContext.hosts());
+            logger.info("New replica sets include:");
+            replicaSets.onEachReplicaSet(replicaSet -> logger.info("  {}", replicaSet));
+        }
         context.requestTaskReconfiguration();
     }
 
@@ -175,14 +176,20 @@ public class MongoDbConnector extends SourceConnector {
         try {
             logger.info("Stopping MongoDB connector");
             this.config = null;
-            if (replicaSetMonitorExecutor != null) replicaSetMonitorExecutor.shutdownNow();
+            if (replicaSetMonitorExecutor != null) {
+                replicaSetMonitorExecutor.shutdownNow();
+            }
             try {
-                if ( this.connectionContext != null ) this.connectionContext.shutdown();
+                if ( this.connectionContext != null ) {
+                    this.connectionContext.shutdown();
+                }
             } finally {
                 logger.info("Stopped MongoDB connector");
             }
         } finally {
-            if ( previousLogContext != null ) previousLogContext.restore();
+            if ( previousLogContext != null ) {
+                previousLogContext.restore();
+            }
         }
     }
 

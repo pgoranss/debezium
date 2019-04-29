@@ -133,6 +133,7 @@ public abstract class AbstractConnectorTest implements Testing {
                     // Oracle connector needs longer time to complete shutdown
                     engine.await(60, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
+                    logger.warn("Engine has not stopped on time");
                     Thread.interrupted();
                 }
             }
@@ -140,23 +141,27 @@ public abstract class AbstractConnectorTest implements Testing {
                 List<Runnable> neverRunTasks = executor.shutdownNow();
                 assertThat(neverRunTasks).isEmpty();
                 try {
-                    while (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    while (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
                         // wait for completion ...
                     }
                 } catch (InterruptedException e) {
+                    logger.warn("Executor has not stopped on time");
                     Thread.interrupted();
                 }
             }
             if (engine != null && engine.isRunning()) {
                 try {
-                    while (!engine.await(5, TimeUnit.SECONDS)) {
+                    while (!engine.await(60, TimeUnit.SECONDS)) {
                         // Wait for connector to stop completely ...
                     }
                 } catch (InterruptedException e) {
+                    logger.warn("Connector has not stopped on time");
                     Thread.interrupted();
                 }
             }
-            if (callback != null) callback.accept(engine != null ? engine.isRunning() : false);
+            if (callback != null){
+                callback.accept(engine != null ? engine.isRunning() : false);
+            }
         } finally {
             engine = null;
             executor = null;
@@ -252,7 +257,9 @@ public abstract class AbstractConnectorTest implements Testing {
         latch = new CountDownLatch(1);
         CompletionCallback wrapperCallback = (success, msg, error) -> {
             try {
-                if (callback != null) callback.handle(success, msg, error);
+                if (callback != null) {
+                    callback.handle(success, msg, error);
+                }
             } finally {
                 if (!success) {
                     // we only unblock if there was an error; in all other cases we're unblocking when a task has been started
@@ -316,7 +323,9 @@ public abstract class AbstractConnectorTest implements Testing {
      * @param unit the time unit; may not be null
      */
     protected void setConsumeTimeout(long timeout, TimeUnit unit) {
-        if (timeout < 0) throw new IllegalArgumentException("The timeout may not be negative");
+        if (timeout < 0) {
+            throw new IllegalArgumentException("The timeout may not be negative");
+        }
         pollTimeoutInMs = unit.toMillis(timeout);
     }
 
@@ -405,7 +414,9 @@ public abstract class AbstractConnectorTest implements Testing {
             records.add(record);
             recordsByTopic.computeIfAbsent(record.topic(), (topicName) -> new ArrayList<SourceRecord>()).add(record);
             String dbName = getAffectedDatabase(record);
-            if (dbName != null) ddlRecordsByDbName.computeIfAbsent(dbName, key -> new ArrayList<>()).add(record);
+            if (dbName != null) {
+                ddlRecordsByDbName.computeIfAbsent(dbName, key -> new ArrayList<>()).add(record);
+            }
         }
 
         protected String getAffectedDatabase(SourceRecord record) {
@@ -506,7 +517,9 @@ public abstract class AbstractConnectorTest implements Testing {
         long now = System.currentTimeMillis();
         long stop = now + unit.toMillis(timeout);
         while (System.currentTimeMillis() < stop) {
-            if (!consumedLines.isEmpty()) break;
+            if (!consumedLines.isEmpty())  {
+                break;
+            }
         }
         return consumedLines.isEmpty() ? false : true;
     }
@@ -564,15 +577,15 @@ public abstract class AbstractConnectorTest implements Testing {
         VerifyRecord.isValidTombstone(record);
     }
 
-    protected void assertOffset(SourceRecord record, Map<String,?> expectedOffset) {
-        Map<String,?> offset = record.sourceOffset();
+    protected void assertOffset(SourceRecord record, Map<String, ?> expectedOffset) {
+        Map<String, ?> offset = record.sourceOffset();
         assertThat(offset).isEqualTo(expectedOffset);
     }
 
     protected void assertOffset(SourceRecord record, String offsetField, Object expectedValue) {
-        Map<String,?> offset = record.sourceOffset();
+        Map<String, ?> offset = record.sourceOffset();
         Object value = offset.get(offsetField);
-        assertSameValue(value,expectedValue);
+        assertSameValue(value, expectedValue);
     }
 
     protected void assertValueField(SourceRecord record, String fieldPath, Object expectedValue) {

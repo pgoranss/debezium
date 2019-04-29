@@ -27,6 +27,7 @@ import io.debezium.data.SchemaUtil;
 import io.debezium.relational.mapping.ColumnMapper;
 import io.debezium.relational.mapping.ColumnMappers;
 import io.debezium.util.SchemaNameAdjuster;
+import io.debezium.util.Strings;
 
 /**
  * Builder that constructs {@link TableSchema} instances for {@link Table} definitions.
@@ -82,10 +83,12 @@ public class TableSchemaBuilder {
      * @return the table schema that can be used for sending rows of data for this table to Kafka Connect; never null
      */
     public TableSchema create(String schemaPrefix, String envelopSchemaName, Table table, Predicate<ColumnId> filter, ColumnMappers mappers) {
-        if (schemaPrefix == null) schemaPrefix = "";
+        if (schemaPrefix == null) {
+            schemaPrefix = "";
+        }
         // Build the schemas ...
         final TableId tableId = table.id();
-        final String tableIdStr = tableId.toString();
+        final String tableIdStr = tableSchemaName(tableId);
         final String schemaNamePrefix = schemaPrefix + tableIdStr;
         LOGGER.debug("Mapping table '{}' to schemas under '{}'", tableId, schemaNamePrefix);
         SchemaBuilder valSchemaBuilder = SchemaBuilder.struct().name(schemaNameAdjuster.adjust(schemaNamePrefix + ".Value"));
@@ -127,6 +130,27 @@ public class TableSchemaBuilder {
     }
 
     /**
+     * Returns the type schema name for the given table.
+     */
+    private String tableSchemaName(TableId tableId) {
+        if (Strings.isNullOrEmpty(tableId.catalog())) {
+            if (Strings.isNullOrEmpty(tableId.schema())) {
+                return tableId.table();
+            }
+            else {
+                return tableId.schema() + "." + tableId.table();
+            }
+        }
+        else if (Strings.isNullOrEmpty(tableId.schema())) {
+            return tableId.catalog() + "." + tableId.table();
+        }
+        // When both catalog and schema is present then only schema is used
+        else {
+            return tableId.schema() + "." + tableId.table();
+        }
+    }
+
+    /**
      * Creates the function that produces a Kafka Connect key object for a row of data.
      *
      * @param schema the Kafka Connect schema for the key; may be null if there is no known schema, in which case the generator
@@ -147,7 +171,11 @@ public class TableSchemaBuilder {
                     Object value = row[recordIndexes[i]];
                     ValueConverter converter = converters[i];
                     if (converter != null) {
-                        value = value == null ? value : converter.convert(value);
+                        // A component of primary key must be not-null.
+                        // It is possible for some databases and values (MySQL and all-zero datetime)
+                        // to be reported as null by JDBC or streaming reader.
+                        // It thus makes sense to convert them to a sensible default replacement value.
+                        value = converter.convert(value);
                         try {
                             result.put(fields[i], value);
                         } catch (DataException e) {
@@ -186,7 +214,16 @@ public class TableSchemaBuilder {
                 Struct result = new Struct(schema);
                 for (int i = 0; i != numFields; ++i) {
                     Object value = row[recordIndexes[i]];
+
                     ValueConverter converter = converters[i];
+
+                    if (converter != null) {
+                      LOGGER.trace("converter for value object: *** {} ***", converter);
+                    }
+                    else {
+                      LOGGER.trace("converter is null...");
+                    }
+
                     if (converter != null) {
                         try {
                             value = converter.convert(value);
@@ -300,7 +337,9 @@ public class TableSchemaBuilder {
                 // Let the mapper add properties to the schema ...
                 mapper.alterFieldSchema(column, fieldBuilder);
             }
-            if (column.isOptional()) fieldBuilder.optional();
+            if (column.isOptional()) {
+                fieldBuilder.optional();
+            }
 
             // if the default value is provided
             if (column.hasDefaultValue()) {

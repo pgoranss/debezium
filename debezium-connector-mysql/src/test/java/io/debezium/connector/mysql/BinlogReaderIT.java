@@ -9,6 +9,7 @@ import static org.fest.assertions.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import io.debezium.connector.mysql.MySqlConnectorConfig.SecureConnectionMode;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -29,6 +30,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
+import io.debezium.connector.mysql.AbstractReader.AcceptAllPredicate;
 import io.debezium.connector.mysql.MySqlConnectorConfig.EventProcessingFailureHandlingMode;
 import io.debezium.data.Envelope;
 import io.debezium.data.KeyValueStore;
@@ -49,6 +51,8 @@ public class BinlogReaderIT {
     private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-binlog.txt").toAbsolutePath();
     private final UniqueDatabase DATABASE = new UniqueDatabase("logical_server_name", "connector_test_ro")
             .withDbHistoryPath(DB_HISTORY_PATH);
+
+    private static final String SET_TLS_PROTOCOLS = "database.enabledTLSProtocols";
 
     private Configuration config;
     private MySqlTaskContext context;
@@ -105,6 +109,18 @@ public class BinlogReaderIT {
         return counter.get();
     }
 
+    protected long filterAtLeast(final int minNumber, final long timeout, final TimeUnit unit) throws InterruptedException {
+        final BinlogReaderMetrics metrics = reader.getMetrics();
+        final long initialFilterCount = metrics.getNumberOfEventsFiltered();
+        final long targetNumber = initialFilterCount + minNumber;
+        long startTime = System.currentTimeMillis();
+        while (metrics.getNumberOfEventsFiltered() < targetNumber && (System.currentTimeMillis() - startTime) < unit.toMillis(timeout)) {
+            // Ignore the records polled.
+            reader.poll();
+        }
+        return reader.getMetrics().getNumberOfEventsFiltered() - initialFilterCount;
+    }
+
     protected Configuration.Builder simpleConfig() {
         return DATABASE.defaultConfig()
                             .with(MySqlConnectorConfig.USER, "replicator")
@@ -116,11 +132,12 @@ public class BinlogReaderIT {
     @Test
     public void shouldCreateSnapshotOfSingleDatabase() throws Exception {
         config = simpleConfig().build();
-        context = new MySqlTaskContext(config);
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
         context.start();
-        context.source().setBinlogStartPoint("",0L); // start from beginning
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
         context.initializeHistory();
-        reader = new BinlogReader("binlog", context);
+        reader = new BinlogReader("binlog", context, new AcceptAllPredicate());
 
         // Start reading the binlog ...
         reader.start();
@@ -177,11 +194,12 @@ public class BinlogReaderIT {
     @Test
     public void shouldCreateSnapshotOfSingleDatabaseWithSchemaChanges() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true).build();
-        context = new MySqlTaskContext(config);
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
         context.start();
-        context.source().setBinlogStartPoint("",0L); // start from beginning
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
         context.initializeHistory();
-        reader = new BinlogReader("binlog", context);
+        reader = new BinlogReader("binlog", context, new AcceptAllPredicate());
 
         // Start reading the binlog ...
         reader.start();
@@ -236,6 +254,46 @@ public class BinlogReaderIT {
         assertThat(orders.numberOfValueSchemaChanges()).isEqualTo(1);
     }
 
+    /**
+     * Setup a DATABASE_WHITELIST filter that filters all events.
+     * Verify all events are properly filtered.
+     * Verify numberOfFilteredEvents metric is incremented correctly.
+     */
+    @Test
+    @FixFor( "DBZ-1206" )
+    public void shouldFilterAllRecordsBasedOnDatabaseWhitelistFilter() throws Exception {
+        // Define configuration that will ignore all events from MySQL source.
+        config = simpleConfig()
+            .with(MySqlConnectorConfig.DATABASE_WHITELIST, "db-does-not-exist")
+            .build();
+
+        final Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
+        context.start();
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
+        context.initializeHistory();
+        reader = new BinlogReader("binlog", context, new AcceptAllPredicate());
+
+        // Start reading the binlog ...
+        reader.start();
+
+        // Lets wait for at least 35 events to be filtered.
+        final int expectedFilterCount = 35;
+        final long numberFiltered = filterAtLeast(expectedFilterCount, 20, TimeUnit.SECONDS);
+
+        // All events should have been filtered.
+        assertThat(numberFiltered).isGreaterThanOrEqualTo(expectedFilterCount);
+
+        // There should be no schema changes
+        assertThat(schemaChanges.recordCount()).isEqualTo(0);
+
+        // There should be no records
+        assertThat(store.collectionCount()).isEqualTo(0);
+
+        // There should be no skipped
+        assertThat(reader.getMetrics().getNumberOfSkippedEvents()).isEqualTo(0);
+    }
+
     @Test
     @FixFor( "DBZ-183" )
     public void shouldHandleTimestampTimezones() throws Exception {
@@ -248,11 +306,12 @@ public class BinlogReaderIT {
                                .with(MySqlConnectorConfig.DATABASE_WHITELIST, REGRESSION_DATABASE.getDatabaseName())
                                .with(MySqlConnectorConfig.TABLE_WHITELIST, REGRESSION_DATABASE.qualifiedTableName(tableName))
                                .build();
-        context = new MySqlTaskContext(config);
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
         context.start();
-        context.source().setBinlogStartPoint("",0L); // start from beginning
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
         context.initializeHistory();
-        reader = new BinlogReader("binlog", context);
+        reader = new BinlogReader("binlog", context, new AcceptAllPredicate());
 
         // Start reading the binlog ...
         reader.start();
@@ -291,11 +350,12 @@ public class BinlogReaderIT {
                                .with(MySqlConnectorConfig.DATABASE_WHITELIST, REGRESSION_DATABASE.getDatabaseName())
                                .with(MySqlConnectorConfig.TABLE_WHITELIST, REGRESSION_DATABASE.qualifiedTableName(tableName))
                                .build();
-        context = new MySqlTaskContext(config);
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
         context.start();
-        context.source().setBinlogStartPoint("",0L); // start from beginning
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
         context.initializeHistory();
-        reader = new BinlogReader("binlog", context);
+        reader = new BinlogReader("binlog", context, null);
 
         // Start reading the binlog ...
         reader.start();
@@ -382,6 +442,52 @@ public class BinlogReaderIT {
         assertThat(consumed).isZero();
     }
 
+    @Test(expected = ConnectException.class)
+    @FixFor( "DBZ-1208" )
+    public void shouldFailOnUnknownTlsProtocol() {
+        final UniqueDatabase REGRESSION_DATABASE = new UniqueDatabase("logical_server_name", "regression_test")
+            .withDbHistoryPath(DB_HISTORY_PATH);
+        REGRESSION_DATABASE.createAndInitialize();
+
+        config = simpleConfig()
+            .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.REQUIRED)
+            .with(SET_TLS_PROTOCOLS, "TLSv1.7")
+            .build();
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
+        context.start();
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
+        context.initializeHistory();
+        reader = new BinlogReader("binlog", context, null);
+
+        // Start reading the binlog ...
+        reader.start();
+    }
+
+    @Test
+    @FixFor( "DBZ-1208" )
+    public void shouldAcceptTls12() {
+        final UniqueDatabase REGRESSION_DATABASE = new UniqueDatabase("logical_server_name", "regression_test")
+            .withDbHistoryPath(DB_HISTORY_PATH);
+        REGRESSION_DATABASE.createAndInitialize();
+
+        config = simpleConfig()
+            .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.REQUIRED)
+            .with(SET_TLS_PROTOCOLS, "TLSv1.2")
+            .build();
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
+        context.start();
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
+        context.initializeHistory();
+        reader = new BinlogReader("binlog", context, null);
+
+        // Start reading the binlog ...
+        reader.start();
+        String acceptedTlsVersion = context.getConnectionContext().getSessionVariableForSslVersion();
+        assertEquals("TLSv1.2", acceptedTlsVersion);
+    }
+
     private void inconsistentSchema(EventProcessingFailureHandlingMode mode) throws InterruptedException, SQLException {
         if (mode == null) {
             config = simpleConfig().build();
@@ -391,11 +497,12 @@ public class BinlogReaderIT {
                     .build();
         }
 
-        context = new MySqlTaskContext(config);
+        Filters filters = new Filters.Builder(config).build();
+        context = new MySqlTaskContext(config, filters);
         context.start();
-        context.source().setBinlogStartPoint("",0L); // start from beginning
+        context.source().setBinlogStartPoint("", 0L); // start from beginning
         context.initializeHistory();
-        reader = new BinlogReader("binlog", context);
+        reader = new BinlogReader("binlog", context, null);
 
         // Start reading the binlog ...
         reader.start();

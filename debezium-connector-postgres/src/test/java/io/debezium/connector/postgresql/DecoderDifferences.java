@@ -10,7 +10,7 @@ import java.util.function.Supplier;
 
 /**
  * A class that contains assertions or expected values tailored to the behaviour of a concrete decoder plugin
- * 
+ *
  * @author Jiri Pechanec
  *
  */
@@ -18,7 +18,7 @@ public class DecoderDifferences {
 
     /**
      * wal2json plugin does not send events for updates on tables that does not define primary key.
-     * 
+     *
      * @param expectedCount
      * @param updatesWithoutPK
      * @return modified count
@@ -30,14 +30,20 @@ public class DecoderDifferences {
     /**
      * wal2json plugin is not currently able to encode and parse quoted identifiers
      *
-     * @author Jiri Pechanec
-     *
      */
     public static class AreQuotedIdentifiersUnsupported implements Supplier<Boolean> {
         @Override
         public Boolean get() {
             return wal2Json();
         }
+    }
+
+    /**
+     * wal2json plugin sends heartbeat only at the end of transaction as the changes in a single transaction
+     * are under the same LSN.
+     */
+    public static boolean singleHeartbeatPerTransaction() {
+        return wal2Json();
     }
 
     private static boolean wal2Json() {
@@ -49,11 +55,21 @@ public class DecoderDifferences {
 
     /**
      * wal2json plugin is not currently able to encode and parse NaN and Inf values
-     * 
+     *
      * @author Jiri Pechanec
      *
      */
     public static boolean areSpecialFPValuesUnsupported() {
         return wal2Json();
+    }
+
+    /**
+     * wal2json plugin does not include toasted column in the update
+     *
+     * @author Jiri Pechanec
+     *
+     */
+    public static boolean areToastedValuesPresentInSchema() {
+        return !wal2Json();
     }
 }

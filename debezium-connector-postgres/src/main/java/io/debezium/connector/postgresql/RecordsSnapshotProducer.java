@@ -12,9 +12,8 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -30,8 +29,10 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.postgresql.util.PGmoney;
 
 import io.debezium.annotation.ThreadSafe;
+import io.debezium.config.ConfigurationDefaults;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.ReplicationConnection;
+import io.debezium.connector.postgresql.spi.Snapshotter;
 import io.debezium.data.Envelope;
 import io.debezium.data.SpecialValueDecimal;
 import io.debezium.function.BlockingConsumer;
@@ -39,9 +40,12 @@ import io.debezium.heartbeat.Heartbeat;
 import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.relational.TableSchema;
+import io.debezium.util.Clock;
 import io.debezium.util.LoggingContext;
+import io.debezium.util.Metronome;
 import io.debezium.util.Strings;
 import io.debezium.util.Threads;
+
 
 /**
  * Producer of {@link org.apache.kafka.connect.source.SourceRecord source records} from a database snapshot. Once completed,
@@ -58,14 +62,16 @@ public class RecordsSnapshotProducer extends RecordsProducer {
     private final Optional<RecordsStreamProducer> streamProducer;
 
     private final AtomicReference<SourceRecord> currentRecord;
+    private final Snapshotter snapshotter;
 
     public RecordsSnapshotProducer(PostgresTaskContext taskContext,
                                    SourceInfo sourceInfo,
-                                   boolean continueStreamingAfterCompletion) {
+                                   Snapshotter snapshotter) {
         super(taskContext, sourceInfo);
         executorService = Threads.newSingleThreadExecutor(PostgresConnector.class, taskContext.config().getLogicalName(), CONTEXT_NAME);
         currentRecord = new AtomicReference<>();
-        if (continueStreamingAfterCompletion) {
+        this.snapshotter = snapshotter;
+        if (snapshotter.shouldStream()) {
             // we need to create the stream producer here to make sure it creates the replication connection;
             // otherwise we can't stream back changes happening while the snapshot is taking place
             streamProducer = Optional.of(new RecordsStreamProducer(taskContext, sourceInfo));
@@ -79,8 +85,9 @@ public class RecordsSnapshotProducer extends RecordsProducer {
         // MDC should be in inherited from parent to child threads
         LoggingContext.PreviousContext previousContext = taskContext.configureLoggingContext(CONTEXT_NAME);
         try {
-            CompletableFuture.runAsync(() -> this.takeSnapshot(eventConsumer), executorService)
-                             .thenRun(() -> this.startStreaming(eventConsumer, failureConsumer))
+            CompletableFuture.runAsync(this::delaySnapshotIfNeeded, executorService)
+                             .thenRunAsync(() -> this.takeSnapshot(eventConsumer), executorService)
+                             .thenRunAsync(() -> this.startStreaming(eventConsumer, failureConsumer), executorService)
                              .exceptionally(e -> {
                                  logger.error("unexpected exception", e.getCause() != null ? e.getCause() : e);
                                  // always stop to clean up data
@@ -94,13 +101,42 @@ public class RecordsSnapshotProducer extends RecordsProducer {
         }
     }
 
+    private void delaySnapshotIfNeeded() {
+        Duration delay = taskContext.getConfig().getSnapshotDelay();
+        if (delay.isZero() || delay.isNegative()) {
+            return;
+        }
+
+        Threads.Timer timer = Threads.timer(Clock.SYSTEM, delay);
+        Metronome metronome = Metronome.parker(ConfigurationDefaults.RETURN_CONTROL_INTERVAL, Clock.SYSTEM);
+
+        while (!timer.expired()) {
+            try {
+                logger.info("The connector will wait for {}s before proceeding", timer.remaining().getSeconds());
+                metronome.pause();
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.debug("Interrupted while awaiting initial snapshot delay");
+                return;
+            }
+        }
+    }
+
     private void startStreaming(BlockingConsumer<ChangeEvent> consumer, Consumer<Throwable> failureConsumer) {
         try {
             // and then start streaming if necessary
             streamProducer.ifPresent(producer -> {
-                logger.info("Snapshot finished, continuing streaming changes from {}", ReplicationConnection.format(sourceInfo.lsn()));
-                producer.start(consumer, failureConsumer);
+                if (sourceInfo.lsn() != null) {
+                    if (logger.isInfoEnabled()) {
+                        logger.info("Snapshot finished, continuing streaming changes from {}", ReplicationConnection.format(sourceInfo.lsn()));
+                    }
+                }
 
+                // still starting the stream producer, also if the connector has stopped already.
+                // otherwise the executor started in its constructor wouldn't be stopped. This logic
+                // will be obsolete when moving to the new framework classes.
+                producer.start(consumer, failureConsumer);
             });
         } finally {
             // always cleanup our local data
@@ -128,6 +164,11 @@ public class RecordsSnapshotProducer extends RecordsProducer {
     }
 
     private void takeSnapshot(BlockingConsumer<ChangeEvent> consumer) {
+        if (executorService.isShutdown()) {
+            logger.info("Not taking snapshot as this task has been cancelled already");
+            return;
+        }
+
         long snapshotStart = clock().currentTimeInMillis();
         Connection jdbcConnection = null;
         try (PostgresConnection connection = taskContext.createConnection()) {
@@ -164,35 +205,40 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             //now that we have the locks, refresh the schema
             schema.refresh(connection, false);
 
-            // get the current position in the log, from which we'll continue streaming once the snapshot it finished
-            // If rows are being inserted while we're doing the snapshot, the xlog pos should increase and so when
-            // we start streaming, we should get back those changes
             long xlogStart = connection.currentXLogLocation();
             long txId = connection.currentTransactionId().longValue();
-            logger.info("\t read xlogStart at '{}' from transaction '{}'", ReplicationConnection.format(xlogStart), txId);
+            if (logger.isInfoEnabled()) {
+                logger.info("\t read xlogStart at '{}' from transaction '{}'", ReplicationConnection.format(xlogStart), txId);
+            }
 
             // and mark the start of the snapshot
             sourceInfo.startSnapshot();
-            sourceInfo.update(xlogStart, clock().currentTimeInMicros(), txId, null);
+            // use the old xmin, as we don't want to update it if in xmin recovery
+            sourceInfo.update(xlogStart, clock().currentTime(), txId, null, sourceInfo.xmin());
 
             logger.info("Step 3: reading and exporting the contents of each table");
             AtomicInteger rowsCounter = new AtomicInteger(0);
-            final Map<TableId, String> selectOverrides = getSnapshotSelectOverridesByTable();
 
             for(TableId tableId : schema.tableIds()) {
                 long exportStart = clock().currentTimeInMillis();
                 logger.info("\t exporting data from table '{}'", tableId);
                 try {
-                    // DBZ-298 Quoting name in case it has been quoted originally; it doesn't do harm if it hasn't been quoted
-                    final String selectStatement = selectOverrides.getOrDefault(tableId, "SELECT * FROM " + tableId.toDoubleQuotedString());
-                    logger.info("For table '{}' using select statement: '{}'", tableId, selectStatement);
+                    final Optional<String> selectStatement = snapshotter.buildSnapshotQuery(tableId);
+                    if (!selectStatement.isPresent()) {
+                        logger.warn("For table '{}' the select statement was not provided, skipping table", tableId);
+                    }
+                    else {
+                        logger.info("For table '{}' using select statement: '{}'", tableId, selectStatement);
 
-                    connection.queryWithBlockingConsumer(selectStatement,
-                            this::readTableStatement,
-                            rs -> readTable(tableId, rs, consumer, rowsCounter));
-                    logger.info("\t finished exporting '{}' records for '{}'; total duration '{}'", rowsCounter.get(),
-                            tableId, Strings.duration(clock().currentTimeInMillis() - exportStart));
-                    rowsCounter.set(0);
+                        connection.queryWithBlockingConsumer(selectStatement.get(),
+                                this::readTableStatement,
+                                rs -> readTable(tableId, rs, consumer, rowsCounter));
+                        if (logger.isInfoEnabled()) {
+                            logger.info("\t finished exporting '{}' records for '{}'; total duration '{}'", rowsCounter.get(),
+                                        tableId, Strings.duration(clock().currentTimeInMillis() - exportStart));
+                        }
+                        rowsCounter.set(0);
+                    }
                 } catch (SQLException e) {
                     throw new ConnectException(e);
                 }
@@ -207,6 +253,10 @@ public class RecordsSnapshotProducer extends RecordsProducer {
                 // process and send the last record after marking it as such
                 logger.info("Step 5: sending the last snapshot record");
                 sourceInfo.markLastSnapshotRecord();
+
+                // the sourceInfo element already has been baked into the record value, so
+                // update the "last_snapshot_marker" in there
+                changeSourceToLastSnapshotRecord(currentRecord);
                 this.currentRecord.set(new SourceRecord(currentRecord.sourcePartition(), sourceInfo.offset(),
                                                         currentRecord.topic(), currentRecord.kafkaPartition(),
                                                         currentRecord.keySchema(), currentRecord.key(),
@@ -217,7 +267,9 @@ public class RecordsSnapshotProducer extends RecordsProducer {
 
             // and complete the snapshot
             sourceInfo.completeSnapshot();
-            logger.info("Snapshot completed in '{}'", Strings.duration(clock().currentTimeInMillis() - snapshotStart));
+            if (logger.isInfoEnabled()) {
+                logger.info("Snapshot completed in '{}'", Strings.duration(clock().currentTimeInMillis() - snapshotStart));
+            }
             Heartbeat
                 .create(
                     taskContext.config().getConfig(),
@@ -227,7 +279,7 @@ public class RecordsSnapshotProducer extends RecordsProducer {
                 .forcedBeat(
                     sourceInfo.partition(),
                     sourceInfo.offset(),
-                    r -> consumer.accept(new ChangeEvent(r)
+                    r -> consumer.accept(new ChangeEvent(r, sourceInfo.lsn())
                 )
             );
         }
@@ -240,7 +292,17 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             Thread.interrupted();
             rollbackTransaction(jdbcConnection);
 
-            logger.warn("Snapshot aborted after '{}'", Strings.duration(clock().currentTimeInMillis() - snapshotStart));
+            if (logger.isWarnEnabled()) {
+                logger.warn("Snapshot aborted after '{}'", Strings.duration(clock().currentTimeInMillis() - snapshotStart));
+            }
+        }
+    }
+
+    private void changeSourceToLastSnapshotRecord(SourceRecord currentRecord) {
+        final Struct envelope = (Struct) currentRecord.value();
+        final Struct source = (Struct) envelope.get("source");
+        if (source.getBoolean(SourceInfo.LAST_SNAPSHOT_RECORD_KEY) != null) {
+            source.put(SourceInfo.LAST_SNAPSHOT_RECORD_KEY, true);
         }
     }
 
@@ -285,6 +347,10 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             final String columnTypeName = metaData.getColumnTypeName(colIdx);
             final PostgresType type = taskContext.schema().getTypeRegistry().get(columnTypeName);
 
+            logger.trace("Type of incoming data is: {}", type.getOid());
+            logger.trace("ColumnTypeName is: {}", columnTypeName);
+            logger.trace("Type is: {}", type);
+
             if (type.isArrayType()) {
                 Array array = rs.getArray(colIdx);
 
@@ -292,7 +358,7 @@ public class RecordsSnapshotProducer extends RecordsProducer {
                     return null;
                 }
 
-                return Arrays.asList((Object[])array.getArray());
+                return Arrays.asList((Object[]) array.getArray());
             }
 
             switch (type.getOid()) {
@@ -311,7 +377,11 @@ public class RecordsSnapshotProducer extends RecordsProducer {
                     return value.isPresent() ? value.get() : new SpecialValueDecimal(rs.getBigDecimal(colIdx));
 
                 default:
-                    return rs.getObject(colIdx);
+                    Object x = rs.getObject(colIdx);
+                    if(x != null) {
+                        logger.trace("rs getobject returns class: {}; rs getObject value is: {}", x.getClass(), x);
+                    }
+                    return x;
             }
         }
         catch (SQLException e) {
@@ -321,14 +391,20 @@ public class RecordsSnapshotProducer extends RecordsProducer {
     }
 
     protected void generateReadRecord(TableId tableId, Object[] rowData) {
+        // Clear the existing record to prevent reprocessing stale data.
+        currentRecord.set(null);
+
         if (rowData.length == 0) {
             return;
         }
+        logger.trace("tableId value is: {}", tableId);
         TableSchema tableSchema = schema().schemaFor(tableId);
         assert tableSchema != null;
         Object key = tableSchema.keyFromColumnData(rowData);
         Struct value = tableSchema.valueFromColumnData(rowData);
-        if (key == null || value == null) {
+
+        if (value == null) {
+            logger.trace("Read event for null key with value {}", value);
             return;
         }
         Schema keySchema = tableSchema.keySchema();
@@ -350,28 +426,6 @@ public class RecordsSnapshotProducer extends RecordsProducer {
             logger.debug("sending read event '{}'", record);
         }
         //send the last generated record
-        consumer.accept(new ChangeEvent(record));
-    }
-
-    /**
-     * Returns any SELECT overrides, if present.
-     */
-    private Map<TableId, String> getSnapshotSelectOverridesByTable() {
-        String tableList = taskContext.getConfig().snapshotSelectOverrides();
-
-        if (tableList == null) {
-            return Collections.emptyMap();
-        }
-
-        Map<TableId, String> snapshotSelectOverridesByTable = new HashMap<>();
-
-        for (String table : tableList.split(",")) {
-            snapshotSelectOverridesByTable.put(
-                TableId.parse(table),
-                taskContext.getConfig().snapshotSelectOverrideForTable(table)
-            );
-        }
-
-        return snapshotSelectOverridesByTable;
+        consumer.accept(new ChangeEvent(record, sourceInfo.lsn()));
     }
 }

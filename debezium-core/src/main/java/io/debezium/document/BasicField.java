@@ -48,19 +48,25 @@ final class BasicField implements Document.Field, Comparable<Document.Field> {
     
     @Override
     public boolean equals(Object obj) {
-        if ( obj == this ) return true;
+        if ( obj == this ) {
+            return true;
+        }
         if ( obj instanceof Document.Field ) {
-            Document.Field that = (Document.Field)obj;
-            return this.getName().equals(that.getName()) && Objects.equals(this.getValue(),that.getValue());
+            Document.Field that = (Document.Field) obj;
+            return this.getName().equals(that.getName()) && Objects.equals(this.getValue(), that.getValue());
         }
         return false;
     }
     
     @Override
     public int compareTo(Document.Field that) {
-        if ( this == that ) return 0;
-        int diff = Strings.compareTo(this.getName(),that.getName());
-        if ( diff != 0 ) return diff;
-        return Value.compareTo(this.getValue(),that.getValue());
+        if ( this == that ) {
+            return 0;
+        }
+        int diff = Strings.compareTo(this.getName(), that.getName());
+        if ( diff != 0 ){
+            return diff;
+        }
+        return Value.compareTo(this.getValue(), that.getValue());
     }
 }

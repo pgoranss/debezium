@@ -9,6 +9,7 @@ package io.debezium.connector.postgresql;
 import static org.junit.Assert.assertNotNull;
 
 import java.net.URL;
+import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.sql.Connection;
@@ -21,6 +22,7 @@ import io.debezium.connector.postgresql.PostgresConnectorConfig.SecureConnection
 import io.debezium.connector.postgresql.connection.PostgresConnection;
 import io.debezium.connector.postgresql.connection.ReplicationConnection;
 import io.debezium.jdbc.JdbcConfiguration;
+import io.debezium.relational.RelationalDatabaseConnectorConfig;
 
 /**
  * A utility for integration test cases to connect the PostgreSQL server running in the Docker container created by this module's
@@ -50,6 +52,11 @@ public final class TestHelper {
      */
     static final String TYPE_LENGTH_PARAMETER_KEY = "__debezium.source.column.length";
 
+    /**
+     * Key for schema parameter used to store a source column's type scale.
+     */
+    static final String TYPE_SCALE_PARAMETER_KEY = "__debezium.source.column.scale";
+
     private TestHelper() {
     }
 
@@ -74,7 +81,7 @@ public final class TestHelper {
     /**
      * @return the decoder plugin used for testing and configured by system property
      */
-    static PostgresConnectorConfig.LogicalDecoder decoderPlugin() {
+    public static PostgresConnectorConfig.LogicalDecoder decoderPlugin() {
         final String s = System.getProperty(PostgresConnectorConfig.PLUGIN_NAME.name());
         return (s == null || s.length() == 0) ? PostgresConnectorConfig.LogicalDecoder.DECODERBUFS : PostgresConnectorConfig.LogicalDecoder.parse(s);
     }
@@ -102,9 +109,16 @@ public final class TestHelper {
     /**
      * Executes a JDBC statement using the default jdbc config without autocommitting the connection
      *
-     * @param statement an array of statement
+     * @param statement A SQL statement
+     * @param furtherStatements Further SQL statement(s)
      */
-    public static void execute(String statement) {
+    public static void execute(String statement, String... furtherStatements) {
+        if (furtherStatements != null) {
+            for (String further : furtherStatements) {
+                statement = statement + further;
+            }
+        }
+
         try (PostgresConnection connection = create()) {
             connection.setAutoCommit(false);
             connection.executeWithoutCommitting(statement);
@@ -149,13 +163,26 @@ public final class TestHelper {
         }
     }
 
+    public static PostgresSchema getSchema(PostgresConnectorConfig config) {
+        return getSchema(config, TestHelper.getTypeRegistry());
+    }
+
+    public static PostgresSchema getSchema(PostgresConnectorConfig config, TypeRegistry typeRegistry) {
+        return new PostgresSchema(
+                config,
+                typeRegistry,
+                Charset.forName("UTF-8"),
+                PostgresTopicSelector.create(config)
+        );
+    }
+
     protected static Set<String> schemaNames() throws SQLException {
         try (PostgresConnection connection = create()) {
             return connection.readAllSchemaNames(Filters.IS_SYSTEM_SCHEMA.negate());
         }
     }
 
-    private static JdbcConfiguration defaultJdbcConfig() {
+    public static JdbcConfiguration defaultJdbcConfig() {
         return JdbcConfiguration.copy(Configuration.fromSystemProperties("database."))
                                 .withDefault(JdbcConfiguration.DATABASE, "postgres")
                                 .withDefault(JdbcConfiguration.HOSTNAME, "localhost")
@@ -169,7 +196,7 @@ public final class TestHelper {
         JdbcConfiguration jdbcConfiguration = defaultJdbcConfig();
         Configuration.Builder builder = Configuration.create();
         jdbcConfiguration.forEach((field, value) -> builder.with(PostgresConnectorConfig.DATABASE_CONFIG_PREFIX + field, value));
-        builder.with(PostgresConnectorConfig.SERVER_NAME, TEST_SERVER)
+        builder.with(RelationalDatabaseConnectorConfig.SERVER_NAME, TEST_SERVER)
                .with(PostgresConnectorConfig.DROP_SLOT_ON_STOP, true)
                .with(PostgresConnectorConfig.STATUS_UPDATE_INTERVAL_MS, 100)
                .with(PostgresConnectorConfig.PLUGIN_NAME, decoderPlugin())

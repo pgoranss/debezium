@@ -357,6 +357,8 @@ columnConstraint
     | STORAGE storageval=(DISK | MEMORY | DEFAULT)                  #storageColumnConstraint
     | referenceDefinition                                           #referenceColumnConstraint
     | COLLATE collationName                                         #collateColumnConstraint
+    | (GENERATED ALWAYS)? AS '(' expression ')' (VIRTUAL | STORED)? #generatedColumnConstraint
+    | SERIAL DEFAULT VALUE                                          #serialDefaultColumnConstraint
     ;
 
 tableConstraint
@@ -584,7 +586,7 @@ alterView
 // details
 
 alterSpecification
-    : tableOption                                                   #alterByTableOption
+    : tableOption (','? tableOption)*                               #alterByTableOption
     | ADD COLUMN? uid columnDefinition (FIRST | AFTER uid)?         #alterByAddColumn
     | ADD COLUMN? 
         '(' 
@@ -609,6 +611,7 @@ alterSpecification
     | CHANGE COLUMN? oldColumn=uid
       newColumn=uid columnDefinition 
       (FIRST | AFTER afterColumn=uid)?                              #alterByChangeColumn
+    | RENAME COLUMN oldColumn=uid TO newColumn=uid                 #alterByRenameColumn
     | LOCK '='? lockType=(DEFAULT | NONE | SHARED | EXCLUSIVE)      #alterByLock
     | MODIFY COLUMN?
       uid columnDefinition (FIRST | AFTER uid)?                     #alterByModifyColumn
@@ -618,7 +621,7 @@ alterSpecification
     | DROP FOREIGN KEY uid                                          #alterByDropForeignKey
     | DISABLE KEYS                                                  #alterByDisableKeys
     | ENABLE KEYS                                                   #alterByEnableKeys
-    | RENAME renameFormat=(TO | AS)? uid                            #alterByRename
+    | RENAME renameFormat=(TO | AS)? (uid | fullId)                 #alterByRename
     | ORDER BY uidList                                              #alterByOrder
     | CONVERT TO CHARACTER SET charsetName
       (COLLATE collationName)?                                      #alterByConvertCharset
@@ -628,7 +631,10 @@ alterSpecification
     | IMPORT TABLESPACE                                             #alterByImportTablespace
     | FORCE                                                         #alterByForce
     | validationFormat=(WITHOUT | WITH) VALIDATION                  #alterByValidate
-    | ADD PARTITION partitionDefinition                             #alterByAddPartition
+    | ADD PARTITION
+        '('
+          partitionDefinition (',' partitionDefinition)*
+        ')'                                                         #alterByAddPartition
     | DROP PARTITION uidList                                        #alterByDropPartition
     | DISCARD PARTITION (uidList | ALL) TABLESPACE                  #alterByDiscardPartition
     | IMPORT PARTITION (uidList | ALL) TABLESPACE                   #alterByImportPartition
@@ -640,7 +646,7 @@ alterSpecification
         ')'                                                         #alterByReorganizePartition
     | EXCHANGE PARTITION uid WITH TABLE tableName
       (validationFormat=(WITH | WITHOUT) VALIDATION)?               #alterByExchangePartition
-    | ANALYZE PARTITION (uidList | ALL)                             #alterByAnalyzePartitiion
+    | ANALYZE PARTITION (uidList | ALL)                             #alterByAnalyzePartition
     | CHECK PARTITION (uidList | ALL)                               #alterByCheckPartition
     | OPTIMIZE PARTITION (uidList | ALL)                            #alterByOptimizePartition
     | REBUILD PARTITION (uidList | ALL)                             #alterByRebuildPartition
@@ -1880,6 +1886,7 @@ engineName
     : ARCHIVE | BLACKHOLE | CSV | FEDERATED | INNODB | MEMORY 
     | MRG_MYISAM | MYISAM | NDB | NDBCLUSTER | PERFORMANCE_SCHEMA
     | TOKUDB
+    | STRING_LITERAL | REVERSE_QUOTE_ID
     ;
 
 uuidSet
@@ -1988,32 +1995,32 @@ dataType
         TINYINT | SMALLINT | MEDIUMINT | INT | INTEGER | BIGINT
       ) 
       lengthOneDimension? (SIGNED | UNSIGNED)? ZEROFILL?                       #dimensionDataType
-    | typeName=(REAL | FLOAT)
+    | typeName=REAL
       lengthTwoDimension? (SIGNED | UNSIGNED)? ZEROFILL?                       #dimensionDataType
     | typeName=DOUBLE PRECISION?
       lengthTwoDimension? (SIGNED | UNSIGNED)? ZEROFILL?                       #dimensionDataType
-    | typeName=(DECIMAL | DEC | FIXED | NUMERIC)
+    | typeName=(DECIMAL | DEC | FIXED | NUMERIC | FLOAT)
       lengthTwoOptionalDimension? (SIGNED | UNSIGNED)? ZEROFILL?               #dimensionDataType
     | typeName=(
         DATE | TINYBLOB | BLOB | MEDIUMBLOB | LONGBLOB
-        | BOOL | BOOLEAN
+        | BOOL | BOOLEAN | SERIAL
       )                                                             #simpleDataType
     | typeName=(
         BIT | TIME | TIMESTAMP | DATETIME | BINARY
         | VARBINARY | YEAR
       ) 
       lengthOneDimension?                                           #dimensionDataType
-    | typeName=(ENUM | SET) 
-      '(' collectionOption (',' collectionOption)* ')' BINARY?
+    | typeName=(ENUM | SET)
+      collectionOptions BINARY?
       ((CHARACTER SET | CHARSET) charsetName)?                      #collectionDataType
     | typeName=(
-        GEOMETRYCOLLECTION | LINESTRING | MULTILINESTRING
+        GEOMETRYCOLLECTION | GEOMCOLLECTION | LINESTRING | MULTILINESTRING
         | MULTIPOINT | MULTIPOLYGON | POINT | POLYGON | JSON | GEOMETRY
       )                                                             #spatialDataType
     ;
 
-collectionOption
-    : STRING_LITERAL
+collectionOptions
+    : '(' STRING_LITERAL (',' STRING_LITERAL)* ')'
     ;
 
 convertedDataType
@@ -2354,22 +2361,22 @@ keywordsCanBeId
     : ACCOUNT | ACTION | AFTER | AGGREGATE | ALGORITHM | ANY
     | AT | AUTHORS | AUTOCOMMIT | AUTOEXTEND_SIZE
     | AUTO_INCREMENT | AVG_ROW_LENGTH | BEGIN | BINLOG | BIT
-    | BLOCK | BOOL | BOOLEAN | BTREE | CASCADED | CHAIN
-    | CHANNEL | CHECKSUM | PAGE_CHECKSUM | CIPHER | CLIENT | COALESCE | CODE
+    | BLOCK | BOOL | BOOLEAN | BTREE | CACHE | CASCADED | CHAIN | CHANGED
+    | CHANNEL | CHECKSUM | PAGE_CHECKSUM | CIPHER | CLIENT | CLOSE | COALESCE | CODE
     | COLUMNS | COLUMN_FORMAT | COMMENT | COMMIT | COMPACT
     | COMPLETION | COMPRESSED | COMPRESSION | CONCURRENT
     | CONNECTION | CONSISTENT | CONTAINS | CONTEXT
     | CONTRIBUTORS | COPY | CPU | DATA | DATAFILE | DEALLOCATE
-    | DEFAULT_AUTH | DEFINER | DELAY_KEY_WRITE | DIRECTORY
+    | DEFAULT_AUTH | DEFINER | DELAY_KEY_WRITE | DES_KEY_FILE | DIRECTORY
     | DISABLE | DISCARD | DISK | DO | DUMPFILE | DUPLICATE
-    | DYNAMIC | ENABLE | ENCRYPTION | ENDS | ENGINE | ENGINES 
+    | DYNAMIC | ENABLE | ENCRYPTION | END | ENDS | ENGINE | ENGINES
     | ERROR | ERRORS | ESCAPE | EVEN | EVENT | EVENTS | EVERY
-    | EXCHANGE | EXCLUSIVE | EXPIRE | EXTENT_SIZE | FAULTS
-    | FIELDS | FILE_BLOCK_SIZE | FILTER | FIRST | FIXED
-    | FOLLOWS | FULL | FUNCTION | GLOBAL | GRANTS
-    | GROUP_REPLICATION | HASH | HOST | IDENTIFIED
+    | EXCHANGE | EXCLUSIVE | EXPIRE | EXPORT | EXTENDED | EXTENT_SIZE | FAST | FAULTS
+    | FIELDS | FILE_BLOCK_SIZE | FILTER | FIRST | FIXED | FLUSH
+    | FOLLOWS | FOUND | FULL | FUNCTION | GENERAL | GLOBAL | GRANTS
+    | GROUP_REPLICATION | HANDLER | HASH | HELP | HOST | HOSTS | IDENTIFIED
     | IGNORE_SERVER_IDS | IMPORT | INDEXES | INITIAL_SIZE
-    | INPLACE | INSERT_METHOD | INSTANCE | INVOKER | IO
+    | INPLACE | INSERT_METHOD | INSTALL | INSTANCE | INVOKER | IO
     | IO_THREAD | IPC | ISOLATION | ISSUER | JSON | KEY_BLOCK_SIZE
     | LANGUAGE | LAST | LEAVES | LESS | LEVEL | LIST | LOCAL
     | LOGFILE | LOGS | MASTER | MASTER_AUTO_POSITION
@@ -2382,33 +2389,33 @@ keywordsCanBeId
     | MASTER_TLS_VERSION | MASTER_USER
     | MAX_CONNECTIONS_PER_HOUR | MAX_QUERIES_PER_HOUR
     | MAX_ROWS | MAX_SIZE | MAX_UPDATES_PER_HOUR
-    | MAX_USER_CONNECTIONS | MEMORY | MERGE | MID | MIGRATE
-    | MIN_ROWS | MODIFY | MUTEX | MYSQL | NAME | NAMES
-    | NCHAR | NEVER | NO | NODEGROUP | NONE | OFFLINE | OFFSET
-    | OJ | OLD_PASSWORD | ONE | ONLINE | ONLY | OPTIMIZER_COSTS
+    | MAX_USER_CONNECTIONS | MEDIUM | MEMORY | MERGE | MID | MIGRATE
+    | MIN_ROWS | MODE | MODIFY | MUTEX | MYSQL | NAME | NAMES
+    | NCHAR | NEVER | NEXT | NO | NODEGROUP | NONE | OFFLINE | OFFSET
+    | OJ | OLD_PASSWORD | ONE | ONLINE | ONLY | OPEN | OPTIMIZER_COSTS
     | OPTIONS | OWNER | PACK_KEYS | PAGE | PARSER | PARTIAL
     | PARTITIONING | PARTITIONS | PASSWORD | PHASE | PLUGINS
     | PLUGIN_DIR | PLUGIN | PORT | PRECEDES | PREPARE | PRESERVE | PREV
     | PROCESSLIST | PROFILE | PROFILES | PROXY | QUERY | QUICK
     | REBUILD | RECOVER | REDO_BUFFER_SIZE | REDUNDANT
-    | RELAYLOG | RELAY_LOG_FILE | RELAY_LOG_POS | REMOVE
+    | RELAY | RELAYLOG | RELAY_LOG_FILE | RELAY_LOG_POS | REMOVE
     | REORGANIZE | REPAIR | REPLICATE_DO_DB | REPLICATE_DO_TABLE
     | REPLICATE_IGNORE_DB | REPLICATE_IGNORE_TABLE
     | REPLICATE_REWRITE_DB | REPLICATE_WILD_DO_TABLE
-    | REPLICATE_WILD_IGNORE_TABLE | REPLICATION | RESUME
+    | REPLICATE_WILD_IGNORE_TABLE | REPLICATION | RESET | RESUME
     | RETURNS | ROLLBACK | ROLLUP | ROTATE | ROW | ROWS
-    | ROW_FORMAT | SAVEPOINT | SCHEDULE | SECURITY | SERVER
+    | ROW_FORMAT | SAVEPOINT | SCHEDULE | SECURITY | SERIAL | SERVER
     | SESSION | SHARE | SHARED | SIGNED | SIMPLE | SLAVE
-    | SNAPSHOT | SOCKET | SOME | SOUNDS | SOURCE
+    | SLOW | SNAPSHOT | SOCKET | SOME | SONAME | SOUNDS | SOURCE
     | SQL_AFTER_GTIDS | SQL_AFTER_MTS_GAPS | SQL_BEFORE_GTIDS
     | SQL_BUFFER_RESULT | SQL_CACHE | SQL_NO_CACHE | SQL_THREAD
     | START | STARTS | STATS_AUTO_RECALC | STATS_PERSISTENT
     | STATS_SAMPLE_PAGES | STATUS | STOP | STORAGE | STRING
     | SUBJECT | SUBPARTITION | SUBPARTITIONS | SUSPEND | SWAPS
-    | SWITCHES | TABLESPACE | TEMPORARY | TEMPTABLE | THAN
-    | TRANSACTION | TRUNCATE | UNDEFINED | UNDOFILE
-    | UNDO_BUFFER_SIZE | UNKNOWN | UPGRADE | USER | VALIDATION
-    | VALUE | VARIABLES | VIEW | WAIT | WARNINGS | WITHOUT
+    | SWITCHES | TABLESPACE | TEMPORARY | TEMPTABLE | THAN | TRADITIONAL
+    | TRANSACTION | TRIGGERS | TRUNCATE | UNDEFINED | UNDOFILE
+    | UNDO_BUFFER_SIZE | UNINSTALL | UNKNOWN | UNTIL | UPGRADE | USER | USE_FRM | USER_RESOURCES
+    | VALIDATION | VALUE | VARIABLES | VIEW | WAIT | WARNINGS | WITHOUT
     | WORK | WRAPPER | X509 | XA | XML
     ;
 

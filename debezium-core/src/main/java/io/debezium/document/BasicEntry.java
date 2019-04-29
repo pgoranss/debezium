@@ -47,18 +47,24 @@ final class BasicEntry implements Array.Entry, Comparable<Array.Entry> {
     
     @Override
     public boolean equals(Object obj) {
-        if ( obj == this ) return true;
+        if ( obj == this ) {
+            return true;
+        }
         if ( obj instanceof Array.Entry ) {
-            Array.Entry that = (Array.Entry)obj;
-            return this.getIndex() == that.getIndex() && Objects.equals(this.getValue(),that.getValue());
+            Array.Entry that = (Array.Entry) obj;
+            return this.getIndex() == that.getIndex() && Objects.equals(this.getValue(), that.getValue());
         }
         return false;
     }
     
     @Override
     public int compareTo(Array.Entry that) {
-        if ( this == that ) return 0;
-        if ( this.getIndex() != that.getIndex() ) return this.getIndex() - that.getIndex();
-        return Value.compareTo(this.getValue(),that.getValue());
+        if ( this == that ) {
+            return 0;
+        }
+        if ( this.getIndex() != that.getIndex() ) {
+            return this.getIndex() - that.getIndex();
+        }
+        return Value.compareTo(this.getValue(), that.getValue());
     }
 }

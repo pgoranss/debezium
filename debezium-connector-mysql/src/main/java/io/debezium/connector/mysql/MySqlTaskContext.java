@@ -5,12 +5,9 @@
  */
 package io.debezium.connector.mysql;
 
-import java.time.Duration;
+import java.util.Collections;
 import java.util.Map;
 import java.util.function.Predicate;
-
-import javax.management.MalformedObjectNameException;
-import javax.management.ObjectName;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
 import io.debezium.connector.common.CdcSourceTaskContext;
+import io.debezium.connector.mysql.MySqlConnectorConfig.GtidNewChannelPosition;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
 import io.debezium.function.Predicates;
 import io.debezium.relational.TableId;
@@ -51,12 +49,16 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      */
     private final boolean tableIdCaseInsensitive;
 
-    public MySqlTaskContext(Configuration config) {
-        this(config, null);
+    public MySqlTaskContext(Configuration config, Filters filters) {
+        this(config, filters, null, null);
     }
 
-    public MySqlTaskContext(Configuration config, Boolean tableIdCaseInsensitive) {
-        super("MySQL", config.getString(MySqlConnectorConfig.SERVER_NAME));
+    public MySqlTaskContext(Configuration config, Filters filters, Map<String, ?> restartOffset) {
+        this(config, filters, null, restartOffset);
+    }
+
+    public MySqlTaskContext(Configuration config, Filters filters, Boolean tableIdCaseInsensitive, Map<String, ?> restartOffset) {
+        super("MySQL", config.getString(MySqlConnectorConfig.SERVER_NAME), Collections::emptyList);
 
         this.config = config;
         this.connectorConfig = new MySqlConnectorConfig(config);
@@ -82,10 +84,10 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
         }
 
         // Set up the MySQL schema ...
-        this.dbSchema = new MySqlSchema(connectorConfig, this.gtidSourceFilter, this.tableIdCaseInsensitive, topicSelector);
+        this.dbSchema = new MySqlSchema(connectorConfig, this.gtidSourceFilter, this.tableIdCaseInsensitive, topicSelector, filters);
 
         // Set up the record processor ...
-        this.recordProcessor = new RecordMakers(dbSchema, source, topicSelector, config.getBoolean(CommonConnectorConfig.TOMBSTONES_ON_DELETE));
+        this.recordProcessor = new RecordMakers(dbSchema, source, topicSelector, config.getBoolean(CommonConnectorConfig.TOMBSTONES_ON_DELETE), restartOffset);
 
         // Set up the DDL filter
         final String ddlFilter = config.getString(DatabaseHistory.DDL_FILTER);
@@ -247,10 +249,6 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
         return config.getString(MySqlConnectorConfig.SNAPSHOT_SELECT_STATEMENT_OVERRIDES_BY_TABLE);
     }
 
-    public Duration snapshotDelay() {
-        return Duration.ofMillis(config.getLong(MySqlConnectorConfig.SNAPSHOT_DELAY_MS));
-    }
-
     public void start() {
         connectionContext.start();
         // Start the MySQL database history, which simply starts up resources but does not recover the history to a specific point
@@ -282,17 +280,6 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
     }
 
     /**
-     * Create a JMX metric name for the given metric.
-     * @param contextName the name of the context
-     * @return the JMX metric name
-     * @throws MalformedObjectNameException if the name is invalid
-     */
-    public ObjectName metricName(String contextName) throws MalformedObjectNameException {
-        //return new ObjectName("debezium.mysql:type=connector-metrics,connector=" + serverName() + ",name=" + contextName);
-        return new ObjectName("debezium.mysql:type=connector-metrics,context=" + contextName + ",server=" + connectorConfig.getLogicalName());
-    }
-
-    /**
      * Apply the include/exclude GTID source filters to the current {@link #source() GTID set} and merge them onto the
      * currently available GTID set from a MySQL server.
      *
@@ -307,10 +294,11 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
      * This method does not mutate any state in the context.
      *
      * @param availableServerGtidSet the GTID set currently available in the MySQL server
+     * @param purgedServerGtid the GTID set already purged by the MySQL server
      * @return A GTID set meant for consuming from a MySQL binlog; may return null if the SourceInfo has no GTIDs and therefore
      *         none were filtered
      */
-    public GtidSet filterGtidSet(GtidSet availableServerGtidSet) {
+    public GtidSet filterGtidSet(GtidSet availableServerGtidSet, GtidSet purgedServerGtid) {
         String gtidStr = source.gtidSet();
         if (gtidStr == null) {
             return null;
@@ -324,7 +312,26 @@ public final class MySqlTaskContext extends CdcSourceTaskContext {
             LOGGER.info("GTID set after applying GTID source includes/excludes to previous recorded offset: {}", filteredGtidSet);
         }
         LOGGER.info("GTID set available on server: {}", availableServerGtidSet);
-        GtidSet mergedGtidSet = availableServerGtidSet.with(filteredGtidSet);
+
+        GtidSet mergedGtidSet;
+
+        if (connectorConfig.gtidNewChannelPosition() == GtidNewChannelPosition.EARLIEST) {
+            final GtidSet knownGtidSet = filteredGtidSet;
+            LOGGER.info("Using first available positions for new GTID channels");
+            final GtidSet relevantAvailableServerGtidSet = (gtidSourceFilter != null) ?
+                    availableServerGtidSet.retainAll(gtidSourceFilter) :
+                    availableServerGtidSet;
+            LOGGER.info("Relevant GTID set available on server: {}", relevantAvailableServerGtidSet);
+
+            mergedGtidSet = relevantAvailableServerGtidSet
+                    .retainAll(uuid -> knownGtidSet.forServerWithId(uuid) != null)
+                    .with(purgedServerGtid)
+                    .with(filteredGtidSet);
+        }
+        else {
+            mergedGtidSet = availableServerGtidSet.with(filteredGtidSet);
+        }
+
         LOGGER.info("Final merged GTID set to use when connecting to MySQL: {}", mergedGtidSet);
         return mergedGtidSet;
     }

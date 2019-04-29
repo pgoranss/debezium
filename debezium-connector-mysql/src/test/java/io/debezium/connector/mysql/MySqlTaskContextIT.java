@@ -21,7 +21,7 @@ public class MySqlTaskContextIT extends MySqlTaskContextTest {
     @Test
     public void shouldCreateTaskFromConfiguration() throws Exception {
         config = simpleConfig().build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         assertThat(context.config()).isSameAs(config);
 
@@ -51,17 +51,17 @@ public class MySqlTaskContextIT extends MySqlTaskContextTest {
         assertThat(context.isSnapshotAllowedWhenNeeded()).isEqualTo(false);
         assertThat(context.isSnapshotNeverAllowed()).isEqualTo(false);
 
-        assertNotConnectedToJdbc();
+        // JDBC connection is automatically created by MySqlTaskContext when it reads database variables
+        assertConnectedToJdbc();
     }
 
     @Test
     public void shouldCloseJdbcConnectionOnShutdown() throws Exception {
         config = simpleConfig().build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
 
-        assertNotConnectedToJdbc();
-        context.getConnectionContext().jdbc().connection(); // this should establish a connection
+        // JDBC connection is automatically created by MySqlTaskContext when it reads database variables
         assertConnectedToJdbc();
 
         context.shutdown();
@@ -71,8 +71,9 @@ public class MySqlTaskContextIT extends MySqlTaskContextTest {
     protected void assertCanConnectToJdbc() throws SQLException {
         AtomicInteger count = new AtomicInteger();
         context.getConnectionContext().jdbc().query("SHOW DATABASES", rs -> {
-            while (rs.next())
+            while (rs.next()) {
                 count.incrementAndGet();
+            }
         });
         assertThat(count.get()).isGreaterThan(0);
     }

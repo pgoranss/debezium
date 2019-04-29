@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>0.9.0-SNAPSHOT</version>
+        <version>0.9.5-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -130,7 +130,7 @@
                   </image>
                   <!-- A container that initiates the data replica set and adds it as shard to router -->
                   <image>
-                    <name>debezium/mongo-initiator:3.2</name>
+                    <name>debezium/mongo-initiator:${version.mongo.server}</name>
                     <run>
                       <namingStrategy>none</namingStrategy>
                       <env>

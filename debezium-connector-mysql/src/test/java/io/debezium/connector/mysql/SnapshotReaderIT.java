@@ -89,7 +89,7 @@ public class SnapshotReaderIT {
     public void shouldCreateSnapshotOfSingleDatabase() throws Exception {
         config = simpleConfig()
                 .build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -186,7 +186,7 @@ public class SnapshotReaderIT {
     @Test
     public void shouldCreateSnapshotOfSingleDatabaseUsingReadEvents() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.DATABASE_WHITELIST, "connector_(.*)_" + DATABASE.getIdentifier()).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -290,7 +290,7 @@ public class SnapshotReaderIT {
     @Test
     public void shouldCreateSnapshotOfSingleDatabaseWithSchemaChanges() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -389,7 +389,7 @@ public class SnapshotReaderIT {
     @Test(expected = ConnectException.class)
     public void shouldCreateSnapshotSchemaOnlyRecovery_exception() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY_RECOVERY).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -411,14 +411,14 @@ public class SnapshotReaderIT {
                 schemaChanges.add(record);
             });
         }
-        
+
         // should fail because we have no existing binlog information
-    }    
-    
+    }
+
     @Test
     public void shouldCreateSnapshotSchemaOnlyRecovery() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY_RECOVERY).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         context.source().setBinlogStartPoint("binlog1", 555); // manually set for happy path testing
         reader = new SnapshotReader("snapshot", context);
@@ -464,7 +464,7 @@ public class SnapshotReaderIT {
         config = simpleConfig()
                 .with(MySqlConnectorConfig.TABLE_WHITELIST, "connector_test_ro_(.*).orders,connector_test_ro_(.*).Products,connector_test_ro_(.*).products_on_hand,connector_test_ro_(.*).dbz_342_timetest")
                 .build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -478,8 +478,9 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
-                if (record.value() != null)
+                if (record.value() != null) {
                     tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+                }
             });
         }
         assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
@@ -489,7 +490,7 @@ public class SnapshotReaderIT {
     public void shouldSnapshotTablesInLexicographicalOrder() throws Exception{
         config = simpleConfig()
                 .build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -505,8 +506,9 @@ public class SnapshotReaderIT {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
                 VerifyRecord.hasNoSourceQuery(record);
-                if (record.value() != null)
+                if (record.value() != null) {
                     tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+                }
             });
         }
         assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
@@ -515,8 +517,9 @@ public class SnapshotReaderIT {
     private Function<SourceRecord, String> getTableNameFromSourceRecord = sourceRecord -> ((Struct) sourceRecord.value()).getStruct("source").getString("table");
     private LinkedHashSet<String> getTableNamesInSpecifiedOrder(String ... tables){
         LinkedHashSet<String> tablesInOrderExpected = new LinkedHashSet<>();
-        for (String table : tables)
+        for (String table : tables) {
             tablesInOrderExpected.add(table);
+        }
         return tablesInOrderExpected;
     }
 
@@ -527,7 +530,7 @@ public class SnapshotReaderIT {
                     .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
                     .with(Heartbeat.HEARTBEAT_INTERVAL, 300_000)
                     .build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);

@@ -400,7 +400,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
         TableEditor table = databaseTables.editOrCreateTable(tableId);
 
         // create_definition ...
-        if (tokens.matches('(')) parseCreateDefinitionList(start, table);
+        if (tokens.matches('(')) {
+            parseCreateDefinitionList(start, table);
+        }
         // table_options ...
         parseTableOptions(start, table);
         // partition_options ...
@@ -807,7 +809,7 @@ public class MySqlDdlParser extends LegacyDdlParser {
             final Field field = new Field(column.name(), -1, schema);
             final ValueConverter valueConverter = converters.converter(column, field);
             if (defaultValue instanceof String) {
-                defaultValue = defaultValuePreConverter.convert(column, (String)defaultValue);
+                defaultValue = defaultValuePreConverter.convert(column, (String) defaultValue);
             }
             defaultValue = valueConverter.convert(defaultValue);
             columnEditor.defaultValue(defaultValue);
@@ -848,7 +850,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
         DataType dataType = dataTypeParser.parse(tokens, errors::addAll);
         if (dataType == null) {
             String dataTypeName = parseDomainName(start);
-            if (dataTypeName != null) dataType = DataType.userDefinedType(dataTypeName);
+            if (dataTypeName != null) {
+                dataType = DataType.userDefinedType(dataTypeName);
+            }
         }
         if (dataType == null) {
             // No data type was found
@@ -871,8 +875,12 @@ public class MySqlDdlParser extends LegacyDdlParser {
             // After DBZ-132, it will always be comma seperated
             column.length(Math.max(0, options.size() * 2 - 1)); // number of options + number of commas
         } else {
-            if (dataType.length() > -1) column.length((int) dataType.length());
-            if (dataType.scale() > -1) column.scale(dataType.scale());
+            if (dataType.length() > -1) {
+                column.length((int) dataType.length());
+            }
+            if (dataType.scale() > -1) {
+                column.scale(dataType.scale());
+            }
         }
 
         if (Types.NCHAR == dataType.jdbcType() || Types.NVARCHAR == dataType.jdbcType()) {
@@ -1074,7 +1082,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
             Map<String, Column> selectedColumnsByAlias = parseColumnsInSelectClause(start);
             if (table.columns().isEmpty()) {
                 selectedColumnsByAlias.forEach((columnName, fromTableColumn) -> {
-                    if (fromTableColumn != null && columnName != null) table.addColumn(fromTableColumn.edit().name(columnName).create());
+                    if (fromTableColumn != null && columnName != null) {
+                        table.addColumn(fromTableColumn.edit().name(columnName).create());
+                    }
                 });
             } else {
                 List<Column> changedColumns = new ArrayList<>();
@@ -1100,7 +1110,7 @@ public class MySqlDdlParser extends LegacyDdlParser {
             Map<String, Table> fromTables = parseSelectFromClause(start);
             if (fromTables.size() == 1) {
                 Table fromTable = fromTables.values().stream().findFirst().get();
-                List<String> fromTablePkColumnNames = fromTable.columnNames();
+                List<String> fromTablePkColumnNames = fromTable.retrieveColumnNames();
                 List<String> viewPkColumnNames = new ArrayList<>();
                 selectedColumnsByAlias.forEach((viewColumnName, fromTableColumn) -> {
                     if (fromTablePkColumnNames.contains(fromTableColumn.name())) {
@@ -1268,7 +1278,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
                 tokens.canConsume("COLUMN");
                 parseCreateDefinitionList(start, table);
             } else if (tokens.canConsume("PARTITION", "(")) {
-                parsePartitionDefinition(start, table);
+                do {
+                    parsePartitionDefinition(start, table);
+                } while (tokens.canConsume(','));
                 tokens.consume(')');
             } else {
                 parseCreateDefinition(start, table, true);
@@ -1591,7 +1603,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
                     // Read block label if set
                     tokens.consume();
                     String label = labels.remove();
-                    if (label != null) tokens.canConsume(label);
+                    if (label != null) {
+                        tokens.canConsume(label);
+                    }
                 } else if (tokens.matchesAnyWordOf("IF", "CASE")) {
                     tokens.consume();
                 } else if (expectedPlainEnds > 0) {
@@ -1608,7 +1622,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
         // We've consumed the corresponding END of the BEGIN, but consume the label if one was used ...
         assert labels.size() == 1;
         String label = labels.remove();
-        if (label != null) tokens.canConsume(label);
+        if (label != null) {
+            tokens.canConsume(label);
+        }
     }
 
     /**
@@ -1634,7 +1650,9 @@ public class MySqlDdlParser extends LegacyDdlParser {
      */
     @SuppressWarnings("unchecked")
     protected void sequentially(Consumer<Marker>... functions) {
-        if (functions == null || functions.length == 0) return;
+        if (functions == null || functions.length == 0) {
+            return;
+        }
         Collection<ParsingException> errors = new ArrayList<>();
         Marker marker = tokens.mark();
         for (Consumer<Marker> function : functions) {

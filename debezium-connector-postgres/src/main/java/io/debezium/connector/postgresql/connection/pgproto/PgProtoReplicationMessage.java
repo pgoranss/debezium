@@ -9,6 +9,7 @@ package io.debezium.connector.postgresql.connection.pgproto;
 import java.math.BigDecimal;
 import java.nio.charset.Charset;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
@@ -68,8 +69,9 @@ class PgProtoReplicationMessage implements ReplicationMessage {
     }
 
     @Override
-    public long getCommitTime() {
-        return rawMessage.getCommitTime();
+    public Instant getCommitTime() {
+        // value is microseconds
+        return Instant.ofEpochSecond(0, rawMessage.getCommitTime() * 1_000);
     }
 
     @Override
@@ -103,7 +105,7 @@ class PgProtoReplicationMessage implements ReplicationMessage {
                     final PgProto.DatumMessage datum = messageList.get(index);
                     final Optional<PgProto.TypeInfo> typeInfo = Optional.ofNullable(hasTypeMetadata() && typeInfoList != null ? typeInfoList.get(index) : null);
                     final String columnName = Strings.unquoteIdentifierPart(datum.getColumnName());
-                    final PostgresType type = typeRegistry.get((int)datum.getColumnType());
+                    final PostgresType type = typeRegistry.get((int) datum.getColumnType());
                     return new AbstractReplicationMessageColumn(columnName, type, typeInfo.map(PgProto.TypeInfo::getModifier).orElse(null), typeInfo.map(PgProto.TypeInfo::getValueOptional).orElse(Boolean.FALSE), hasTypeMetadata()) {
 
                         @Override
@@ -173,6 +175,10 @@ class PgProtoReplicationMessage implements ReplicationMessage {
             case PgOid.UUID:
             case PgOid.BIT:
             case PgOid.VARBIT:
+            case PgOid.INET_OID:
+            case PgOid.CIDR_OID:
+            case PgOid.MACADDR_OID:
+            case PgOid.MACADDR8_OID:
                 return datumMessage.hasDatumString() ? datumMessage.getDatumString() : null;
             case PgOid.DATE:
                 return datumMessage.hasDatumInt32() ? (long) datumMessage.getDatumInt32() : null;
@@ -208,7 +214,12 @@ class PgProtoReplicationMessage implements ReplicationMessage {
                 PgProto.Point datumPoint = datumMessage.getDatumPoint();
                 return new PGpoint(datumPoint.getX(), datumPoint.getY());
             }
+            case PgOid.TSRANGE_OID:
             case PgOid.TSTZRANGE_OID:
+            case PgOid.DATERANGE_OID:
+            case PgOid.INT4RANGE_OID:
+            case PgOid.NUM_RANGE_OID:
+            case PgOid.INT8RANGE_OID:
                 return datumMessage.hasDatumBytes() ? new String(datumMessage.getDatumBytes().toByteArray(), Charset.forName("UTF-8")) : null;
             case PgOid.INT2_ARRAY:
             case PgOid.INT4_ARRAY:
@@ -238,7 +249,17 @@ class PgProtoReplicationMessage implements ReplicationMessage {
             case PgOid.JSONB_ARRAY:
             case PgOid.JSON_ARRAY:
             case PgOid.REF_CURSOR_ARRAY:
-                return getArray(datumMessage, connection, columnType);
+            case PgOid.INET_ARRAY:
+            case PgOid.CIDR_ARRAY:
+            case PgOid.MACADDR_ARRAY:
+            case PgOid.MACADDR8_ARRAY:
+            case PgOid.TSRANGE_ARRAY:
+            case PgOid.TSTZRANGE_ARRAY:
+            case PgOid.DATERANGE_ARRAY:
+            case PgOid.INT4RANGE_ARRAY:
+            case PgOid.NUM_RANGE_ARRAY:
+            case PgOid.INT8RANGE_ARRAY:
+            return getArray(datumMessage, connection, columnType);
 
             case PgOid.UNSPECIFIED:
                 return null;
@@ -248,10 +269,12 @@ class PgProtoReplicationMessage implements ReplicationMessage {
                 if (type.getOid() == typeRegistry.geometryOid() || type.getOid() == typeRegistry.geographyOid() || type.getOid() == typeRegistry.citextOid() ) {
                     return datumMessage.getDatumBytes().toByteArray();
                 }
+                if(type.getOid() == typeRegistry.hstoreOid()) {
+                    return datumMessage.getDatumBytes().toByteArray();
+                }
                 if (type.getOid() == typeRegistry.geometryArrayOid() || type.getOid() == typeRegistry.geographyArrayOid() || type.getOid() == typeRegistry.citextArrayOid() ) {
                     return getArray(datumMessage, connection, columnType);
                 }
-
                 // unknown data type is sent by decoder as binary value
                 if (includeUnknownDatatypes && datumMessage.hasDatumBytes()) {
                     return datumMessage.getDatumBytes().toByteArray();
@@ -273,11 +296,13 @@ class PgProtoReplicationMessage implements ReplicationMessage {
         //    representations over the wire.
         try {
             byte[] data = datumMessage.hasDatumBytes()? datumMessage.getDatumBytes().toByteArray() : null;
-            if (data == null) return null;
+            if (data == null) {
+                return null;
+            }
             String dataString = new String(data, Charset.forName("UTF-8"));
             PgArray arrayData = new PgArray(connection.get(), columnType, dataString);
             Object deserializedArray = arrayData.getArray();
-            return Arrays.asList((Object[])deserializedArray);
+            return Arrays.asList((Object[]) deserializedArray);
         }
         catch (SQLException e) {
             LOGGER.warn("Unexpected exception trying to process PgArray column '{}'", datumMessage.getColumnName(), e);

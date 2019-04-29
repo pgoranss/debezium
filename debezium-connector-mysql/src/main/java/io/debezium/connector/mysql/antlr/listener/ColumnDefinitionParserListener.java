@@ -37,6 +37,8 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
     private final DataTypeResolver dataTypeResolver;
     private final TableEditor tableEditor;
     private ColumnEditor columnEditor;
+    private boolean uniqueColumn;
+    private Boolean optionalColumn;
 
     private final MySqlValueConverters converters;
     private final MySqlDefaultValuePreConverter defaultValuePreConverter = new MySqlDefaultValuePreConverter();
@@ -62,17 +64,28 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
 
     @Override
     public void enterColumnDefinition(MySqlParser.ColumnDefinitionContext ctx) {
+        uniqueColumn = false;
+        optionalColumn = null;
         resolveColumnDataType(ctx.dataType());
         super.enterColumnDefinition(ctx);
     }
 
     @Override
-    public void enterUniqueKeyColumnConstraint(MySqlParser.UniqueKeyColumnConstraintContext ctx) {
-        if (!tableEditor.hasPrimaryKey()) {
+    public void exitColumnDefinition(MySqlParser.ColumnDefinitionContext ctx) {
+        if (optionalColumn != null) {
+            columnEditor.optional(optionalColumn.booleanValue());
+        }
+        if (uniqueColumn && !tableEditor.hasPrimaryKey()) {
             // take the first unique constrain if no primary key is set
             tableEditor.addColumn(columnEditor.create());
             tableEditor.setPrimaryKeyNames(columnEditor.name());
         }
+        super.exitColumnDefinition(ctx);
+    }
+
+    @Override
+    public void enterUniqueKeyColumnConstraint(MySqlParser.UniqueKeyColumnConstraintContext ctx) {
+        uniqueColumn = true;
         super.enterUniqueKeyColumnConstraint(ctx);
     }
 
@@ -80,7 +93,7 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
     public void enterPrimaryKeyColumnConstraint(MySqlParser.PrimaryKeyColumnConstraintContext ctx) {
         // this rule will be parsed only if no primary key is set in a table
         // otherwise the statement can't be executed due to multiple primary key error
-        columnEditor.optional(false);
+        optionalColumn = Boolean.FALSE;
         tableEditor.addColumn(columnEditor.create());
         tableEditor.setPrimaryKeyNames(columnEditor.name());
         super.enterPrimaryKeyColumnConstraint(ctx);
@@ -88,7 +101,7 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
 
     @Override
     public void enterNullNotnull(MySqlParser.NullNotnullContext ctx) {
-        columnEditor.optional(ctx.NOT() == null);
+        optionalColumn = Boolean.valueOf(ctx.NOT() == null);
         super.enterNullNotnull(ctx);
     }
 
@@ -135,6 +148,12 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
         columnEditor.autoIncremented(true);
         columnEditor.generated(true);
         super.enterAutoIncrementColumnConstraint(ctx);
+    }
+
+    @Override
+    public void enterSerialDefaultColumnConstraint(MySqlParser.SerialDefaultColumnConstraintContext ctx) {
+        serialColumn();
+        super.enterSerialDefaultColumnConstraint(ctx);
     }
 
     private void resolveColumnDataType(MySqlParser.DataTypeContext dataTypeContext) {
@@ -206,8 +225,9 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
             }
 
             if (dataType.name().toUpperCase().equals("SET")) {
-                // After DBZ-132, it will always be comma seperated
-                columnEditor.length(Math.max(0, collectionDataTypeContext.collectionOption().size() * 2 - 1)); // number of options + number of commas
+                // After DBZ-132, it will always be comma separated
+                int optionsSize = collectionDataTypeContext.collectionOptions().STRING_LITERAL().size();
+                columnEditor.length(Math.max(0, optionsSize * 2 - 1)); // number of options + number of commas
             }
             else {
                 columnEditor.length(1);
@@ -218,7 +238,17 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
 
         if (dataTypeName.equals("ENUM") || dataTypeName.equals("SET")) {
             // type expression has to be set, because the value converter needs to know the enum or set options
-            columnEditor.type(dataTypeName, getText(dataTypeContext));
+            MySqlParser.CollectionDataTypeContext collectionDataTypeContext =
+                       (MySqlParser.CollectionDataTypeContext) dataTypeContext;
+
+            int start = dataTypeContext.start.getStartIndex();
+            int stop = collectionDataTypeContext.collectionOptions().stop.getStopIndex();
+            columnEditor.type(dataTypeName, getText(dataTypeContext, start, stop));
+        }
+        else if (dataTypeName.equals("SERIAL")) {
+            // SERIAL is an alias for BIGINT UNSIGNED NOT NULL AUTO_INCREMENT UNIQUE
+            columnEditor.type("BIGINT UNSIGNED");
+            serialColumn();
         }
         else {
             columnEditor.type(dataTypeName);
@@ -242,7 +272,19 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
         }
     }
 
+    private void serialColumn() {
+        if (optionalColumn == null) {
+            optionalColumn = Boolean.FALSE;
+        }
+        uniqueColumn = true;
+        columnEditor.autoIncremented(true);
+        columnEditor.generated(true);
+    }
+
     private void convertDefaultValueToSchemaType(ColumnEditor columnEditor) {
+        if (optionalColumn != null) {
+            columnEditor.optional(optionalColumn.booleanValue());
+        }
         final Column column = columnEditor.create();
         // if converters is not null and the default value is not null, we need to convert default value
         if (converters != null && columnEditor.defaultValue() != null) {
@@ -258,7 +300,7 @@ public class ColumnDefinitionParserListener extends MySqlParserBaseListener {
             final Field field = new Field(column.name(), -1, schema);
             final ValueConverter valueConverter = converters.converter(column, field);
             if (defaultValue instanceof String) {
-                defaultValue = defaultValuePreConverter.convert(column, (String)defaultValue);
+                defaultValue = defaultValuePreConverter.convert(column, (String) defaultValue);
             }
             defaultValue = valueConverter.convert(defaultValue);
             columnEditor.defaultValue(defaultValue);

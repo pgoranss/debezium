@@ -5,6 +5,7 @@
  */
 package io.debezium.connector.mysql;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Collections;
@@ -13,6 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
 
+import io.debezium.config.Configuration;
 import org.apache.avro.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.fest.assertions.GenericAssert;
@@ -22,7 +24,6 @@ import org.junit.Test;
 import static org.fest.assertions.Assertions.assertThat;
 
 import io.confluent.connect.avro.AvroData;
-import io.debezium.connector.AbstractSourceInfo;
 import io.debezium.doc.FixFor;
 import io.debezium.document.Document;
 
@@ -148,6 +149,43 @@ public class SourceInfoTest {
         assertThat(source.binlogPosition()).isEqualTo(100);
         assertThat(source.rowsToSkipUponRestart()).isEqualTo(5);
         assertThat(source.isSnapshotInEffect()).isTrue();
+    }
+
+    @Test
+    public void shouldRecoverSourceInfoFromOffsetWithFilterData() {
+        final String databaseWhitelist = "a,b";
+        final String tableWhitelist = "c.foo,d.bar,d.baz";
+        Map<String, String> offset = offset(10, 10);
+        offset.put(SourceInfo.DATABASE_WHITELIST_KEY, databaseWhitelist);
+        offset.put(SourceInfo.TABLE_WHITELIST_KEY, tableWhitelist);
+
+        sourceWith(offset);
+        assertThat(source.hasFilterInfo()).isTrue();
+        assertEquals(databaseWhitelist, source.getDatabaseWhitelist());
+        assertEquals(tableWhitelist, source.getTableWhitelist());
+        // confirm other filter info is null
+        assertThat(source.getDatabaseBlacklist()).isNull();
+        assertThat(source.getTableBlacklist()).isNull();
+    }
+
+    @Test
+    public void setOffsetFilterFromFilter() {
+        final String databaseBlacklist = "a,b";
+        final String tableBlacklist = "c.foo, d.bar, d.baz";
+        Map<String, String> offset = offset(10, 10);
+
+        sourceWith(offset);
+        assertThat(!source.hasFilterInfo());
+
+        final Configuration configuration = Configuration.create()
+                                                         .with(MySqlConnectorConfig.DATABASE_BLACKLIST, databaseBlacklist)
+                                                         .with(MySqlConnectorConfig.TABLE_BLACKLIST, tableBlacklist)
+                                                         .build();
+        source.setFilterDataFromConfig(configuration);
+
+        assertThat(source.hasFilterInfo()).isTrue();
+        assertEquals(databaseBlacklist, source.getDatabaseBlacklist());
+        assertEquals(tableBlacklist, source.getTableBlacklist());
     }
 
     @Test
@@ -352,7 +390,9 @@ public class SourceInfoTest {
         long position = (Long) offset.get(SourceInfo.BINLOG_POSITION_OFFSET_KEY);
         assertThat(position).isEqualTo(positionOfEvent + eventSize);
         Long rowsToSkip = (Long) offset.get(SourceInfo.BINLOG_ROW_IN_EVENT_OFFSET_KEY);
-        if (rowsToSkip == null) rowsToSkip = 0L;
+        if (rowsToSkip == null) {
+            rowsToSkip = 0L;
+        }
         assertThat(rowsToSkip).isEqualTo(0);
         assertThat(offset.get(SourceInfo.EVENTS_TO_SKIP_OFFSET_KEY)).isNull();
         if (source.gtidSet() != null) {
@@ -361,7 +401,9 @@ public class SourceInfoTest {
     }
 
     protected void handleNextEvent(long positionOfEvent, long eventSize, int rowCount) {
-        if (inTxn) ++eventNumberInTxn;
+        if (inTxn) {
+            ++eventNumberInTxn;
+        }
         source.setEventPosition(positionOfEvent, eventSize);
         for (int row = 0; row != rowCount; ++row) {
             // Get the offset for this row (always first!) ...
@@ -376,7 +418,9 @@ public class SourceInfoTest {
                 assertThat(position).isEqualTo(positionOfBeginEvent);
                 // and the number of the last completed event (the previous one) ...
                 Long eventsToSkip = (Long) offset.get(SourceInfo.EVENTS_TO_SKIP_OFFSET_KEY);
-                if (eventsToSkip == null) eventsToSkip = 0L;
+                if (eventsToSkip == null) {
+                    eventsToSkip = 0L;
+                }
                 assertThat(eventsToSkip).isEqualTo(eventNumberInTxn - 1);
             } else {
                 // Matches the next event ...
@@ -384,7 +428,9 @@ public class SourceInfoTest {
                 assertThat(offset.get(SourceInfo.EVENTS_TO_SKIP_OFFSET_KEY)).isNull();
             }
             Long rowsToSkip = (Long) offset.get(SourceInfo.BINLOG_ROW_IN_EVENT_OFFSET_KEY);
-            if (rowsToSkip == null) rowsToSkip = 0L;
+            if (rowsToSkip == null) {
+                rowsToSkip = 0L;
+            }
             if ((row + 1) == rowCount) {
                 // This is the last row, so the next binlog position should be the number of rows in the event ...
                 assertThat(rowsToSkip).isEqualTo(rowCount);
@@ -417,8 +463,12 @@ public class SourceInfoTest {
         offset.put(SourceInfo.BINLOG_FILENAME_OFFSET_KEY, FILENAME);
         offset.put(SourceInfo.BINLOG_POSITION_OFFSET_KEY, Long.toString(position));
         offset.put(SourceInfo.BINLOG_ROW_IN_EVENT_OFFSET_KEY, Integer.toString(row));
-        if (gtidSet != null) offset.put(SourceInfo.GTID_SET_KEY, gtidSet);
-        if (snapshot) offset.put(SourceInfo.SNAPSHOT_KEY, Boolean.TRUE.toString());
+        if (gtidSet != null) {
+            offset.put(SourceInfo.GTID_SET_KEY, gtidSet);
+        }
+        if (snapshot) {
+            offset.put(SourceInfo.SNAPSHOT_KEY, Boolean.TRUE.toString());
+        }
         return offset;
     }
 
@@ -568,7 +618,13 @@ public class SourceInfoTest {
     @Test
     public void versionIsPresent() {
         sourceWith(offset(100, 5, true));
-        assertThat(source.struct().getString(AbstractSourceInfo.DEBEZIUM_VERSION_KEY)).isEqualTo(Module.version());
+        assertThat(source.struct().getString(SourceInfo.DEBEZIUM_VERSION_KEY)).isEqualTo(Module.version());
+    }
+
+    @Test
+    public void connectorIsPresent() {
+        sourceWith(offset(100, 5, true));
+        assertThat(source.struct().getString(SourceInfo.DEBEZIUM_CONNECTOR_KEY)).isEqualTo(Module.name());
     }
 
     protected Document positionWithGtids(String gtids) {
@@ -638,7 +694,9 @@ public class SourceInfoTest {
         }
 
         public PositionAssert isAt(Document otherPosition, Predicate<String> gtidFilter) {
-            if (SourceInfo.isPositionAtOrBefore(actual, otherPosition, gtidFilter)) return this;
+            if (SourceInfo.isPositionAtOrBefore(actual, otherPosition, gtidFilter)) {
+                return this;
+            }
             failIfCustomMessageIsSet();
             throw failure(actual + " should be consider same position as " + otherPosition);
         }
@@ -656,7 +714,9 @@ public class SourceInfoTest {
         }
 
         public PositionAssert isAtOrBefore(Document otherPosition, Predicate<String> gtidFilter) {
-            if (SourceInfo.isPositionAtOrBefore(actual, otherPosition, gtidFilter)) return this;
+            if (SourceInfo.isPositionAtOrBefore(actual, otherPosition, gtidFilter)) {
+                return this;
+            }
             failIfCustomMessageIsSet();
             throw failure(actual + " should be consider same position as or before " + otherPosition);
         }
@@ -666,7 +726,9 @@ public class SourceInfoTest {
         }
 
         public PositionAssert isAfter(Document otherPosition, Predicate<String> gtidFilter) {
-            if (!SourceInfo.isPositionAtOrBefore(actual, otherPosition, gtidFilter)) return this;
+            if (!SourceInfo.isPositionAtOrBefore(actual, otherPosition, gtidFilter)) {
+                return this;
+            }
             failIfCustomMessageIsSet();
             throw failure(actual + " should be consider after " + otherPosition);
         }

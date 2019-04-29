@@ -163,6 +163,11 @@ public final class SourceInfo extends AbstractSourceInfo {
         return SOURCE_SCHEMA;
     }
 
+    @Override
+    protected String connector() {
+        return Module.name();
+    }
+
     /**
      * Get the Kafka Connect detail about the source "partition" for the given database in the replica set. If the database is
      * not known, this method records the new partition.
@@ -171,7 +176,9 @@ public final class SourceInfo extends AbstractSourceInfo {
      * @return the source partition information; never null
      */
     public Map<String, String> partition(String replicaSetName) {
-        if (replicaSetName == null) throw new IllegalArgumentException("Replica set name may not be null");
+        if (replicaSetName == null) {
+            throw new IllegalArgumentException("Replica set name may not be null");
+        }
         return sourcePartitionsByReplicaSetName.computeIfAbsent(replicaSetName, rsName -> {
             return Collect.hashMapOf(SERVER_ID_KEY, serverName, REPLICA_SET_NAME, rsName);
         });
@@ -198,7 +205,9 @@ public final class SourceInfo extends AbstractSourceInfo {
      */
     public Map<String, ?> lastOffset(String replicaSetName) {
         Position existing = positionsByReplicaSetName.get(replicaSetName);
-        if (existing == null) existing = INITIAL_POSITION;
+        if (existing == null) {
+            existing = INITIAL_POSITION;
+        }
         if (isInitialSyncOngoing(replicaSetName)) {
             return Collect.hashMapOf(TIMESTAMP, Integer.valueOf(existing.getTime()),
                                      ORDER, Integer.valueOf(existing.getInc()),
@@ -258,7 +267,9 @@ public final class SourceInfo extends AbstractSourceInfo {
     }
 
     private Struct offsetStructFor(String replicaSetName, String namespace, Position position, boolean isInitialSync) {
-        if (position == null) position = INITIAL_POSITION;
+        if (position == null) {
+            position = INITIAL_POSITION;
+        }
         Struct result = super.struct();
         result.put(SERVER_NAME, serverName);
         result.put(REPLICA_SET_NAME, replicaSetName);
@@ -293,8 +304,12 @@ public final class SourceInfo extends AbstractSourceInfo {
      * @throws ConnectException if any offset parameter values are missing, invalid, or of the wrong type
      */
     public boolean setOffsetFor(String replicaSetName, Map<String, ?> sourceOffset) {
-        if (replicaSetName == null) throw new IllegalArgumentException("The replica set name may not be null");
-        if (sourceOffset == null) return false;
+        if (replicaSetName == null) {
+            throw new IllegalArgumentException("The replica set name may not be null");
+        }
+        if (sourceOffset == null) {
+            return false;
+        }
         // We have previously recorded at least one offset for this database ...
         boolean initSync = booleanOffsetValue(sourceOffset, INITIAL_SYNC);
         if (initSync) {
@@ -352,8 +367,12 @@ public final class SourceInfo extends AbstractSourceInfo {
 
     private static int intOffsetValue(Map<String, ?> values, String key) {
         Object obj = values.get(key);
-        if (obj == null) return 0;
-        if (obj instanceof Number) return ((Number) obj).intValue();
+        if (obj == null) {
+            return 0;
+        }
+        if (obj instanceof Number) {
+            return ((Number) obj).intValue();
+        }
         try {
             return Integer.parseInt(obj.toString());
         } catch (NumberFormatException e) {
@@ -363,8 +382,12 @@ public final class SourceInfo extends AbstractSourceInfo {
 
     private static long longOffsetValue(Map<String, ?> values, String key) {
         Object obj = values.get(key);
-        if (obj == null) return 0;
-        if (obj instanceof Number) return ((Number) obj).longValue();
+        if (obj == null) {
+            return 0;
+        }
+        if (obj instanceof Number) {
+            return ((Number) obj).longValue();
+        }
         try {
             return Long.parseLong(obj.toString());
         } catch (NumberFormatException e) {

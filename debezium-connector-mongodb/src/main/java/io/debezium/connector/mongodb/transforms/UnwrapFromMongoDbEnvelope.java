@@ -10,6 +10,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
+import io.debezium.data.Envelope;
+import io.debezium.transforms.UnwrapFromEnvelope.DeleteHandling;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.Schema;
@@ -19,7 +21,9 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.transforms.ExtractField;
 import org.apache.kafka.connect.transforms.Flatten;
 import org.apache.kafka.connect.transforms.Transformation;
+import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
+import org.bson.BsonNull;
 import org.bson.BsonValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,16 +39,17 @@ import io.debezium.config.Field;
  *
  * @param <R> the subtype of {@link ConnectRecord} on which this transformation will operate
  * @author Sairam Polavarapu
+ * @author Renato mefi
  */
 public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Transformation<R> {
 
-    public static enum ArrayEncoding implements EnumeratedValue {
+    public enum ArrayEncoding implements EnumeratedValue {
         ARRAY("array"),
         DOCUMENT("document");
 
         private final String value;
 
-        private ArrayEncoding(String value) {
+        ArrayEncoding(String value) {
             this.value = value;
         }
 
@@ -60,10 +65,14 @@ public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Tr
          * @return the matching option, or null if no match is found
          */
         public static ArrayEncoding parse(String value) {
-            if (value == null) return null;
+            if (value == null) {
+                return null;
+            }
             value = value.trim();
             for (ArrayEncoding option : ArrayEncoding.values()) {
-                if (option.getValue().equalsIgnoreCase(value)) return option;
+                if (option.getValue().equalsIgnoreCase(value)) {
+                    return option;
+                }
             }
             return null;
         }
@@ -71,16 +80,23 @@ public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Tr
         /**
          * Determine if the supplied value is one of the predefined options.
          *
-         * @param value the configuration property value; may not be null
+         * @param value        the configuration property value; may not be null
          * @param defaultValue the default value; may be null
          * @return the matching option, or null if no match is found and the non-null default is invalid
          */
         public static ArrayEncoding parse(String value, String defaultValue) {
             ArrayEncoding mode = parse(value);
-            if (mode == null && defaultValue != null) mode = parse(defaultValue);
+            if (mode == null && defaultValue != null) {
+                mode = parse(defaultValue);
+            }
             return mode;
         }
     }
+
+    final static String DEBEZIUM_OPERATION_HEADER_KEY = "__debezium-operation";
+
+    private static final String DELETED_FIELD = "__deleted";
+
     private static final Logger LOGGER = LoggerFactory.getLogger(UnwrapFromMongoDbEnvelope.class);
 
     private static final Field ARRAY_ENCODING = Field.create("array.encoding")
@@ -88,9 +104,9 @@ public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Tr
             .withEnum(ArrayEncoding.class, ArrayEncoding.ARRAY)
             .withWidth(ConfigDef.Width.SHORT)
             .withImportance(ConfigDef.Importance.MEDIUM)
-            .withDescription("The arrays can be encoded using 'array' schema type (the default) ar as a 'struct' (similar to how BSON encodes arrays). "
+            .withDescription("The arrays can be encoded using 'array' schema type (the default) or as a 'document' (similar to how BSON encodes arrays). "
                     + "'array' is easier to consume but requires all elements in the array to be of the same type. "
-                    + "Use 'struct' if the arrays in data source mix different types together.");
+                    + "Use 'document' if the arrays in data source mix different types together.");
 
     private static final Field FLATTEN_STRUCT = Field.create("flatten.struct")
             .withDisplayName("Flatten struct")
@@ -110,115 +126,216 @@ public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Tr
             .withDescription("Delimiter to concat between field names from the input record when generating field names for the"
                     + "output record.");
 
-    private final ExtractField<R> afterExtractor = new ExtractField.Value<R>();
-    private final ExtractField<R> patchExtractor = new ExtractField.Value<R>();
-    private final ExtractField<R> keyExtractor = new ExtractField.Key<R>();
+    private static final Field OPERATION_HEADER = Field.create("operation.header")
+            .withDisplayName("Adds a message header representing the applied operation")
+            .withType(ConfigDef.Type.BOOLEAN)
+            .withWidth(ConfigDef.Width.SHORT)
+            .withImportance(ConfigDef.Importance.LOW)
+            .withDefault(false)
+            .withDescription("Adds the operation {@link FieldName#OPERATION operation} as a header." +
+                    "Its key is '" + DEBEZIUM_OPERATION_HEADER_KEY + "'");
+
+    private static final Field HANDLE_DELETES = Field.create("delete.handling.mode")
+            .withDisplayName("Handle delete records")
+            .withEnum(DeleteHandling.class, DeleteHandling.DROP)
+            .withWidth(ConfigDef.Width.MEDIUM)
+            .withImportance(ConfigDef.Importance.MEDIUM)
+            .withDescription("How to handle delete records. Options are: "
+                    + "none - records are passed,"
+                    + "drop - records are removed,"
+                    + "rewrite - __deleted field is added to records.");
+
+    private static final Field DROP_TOMBSTONES = Field.create("drop.tombstones")
+            .withDisplayName("Drop tombstones")
+            .withType(ConfigDef.Type.BOOLEAN)
+            .withWidth(ConfigDef.Width.SHORT)
+            .withImportance(ConfigDef.Importance.LOW)
+            .withDefault(true)
+            .withDescription("Debezium by default generates a tombstone record to enable Kafka compaction after "
+                    + "a delete record was generated. This record is usually filtered out to avoid duplicates "
+                    + "as a delete record is converted to a tombstone record, too");
+
+    private final ExtractField<R> afterExtractor = new ExtractField.Value<>();
+    private final ExtractField<R> patchExtractor = new ExtractField.Value<>();
+    private final ExtractField<R> keyExtractor = new ExtractField.Key<>();
 
     private MongoDataConverter converter;
-    private final Flatten<R> recordFlattener = new Flatten.Value<R>();
+    private final Flatten<R> recordFlattener = new Flatten.Value<>();
 
+    private boolean addOperationHeader;
     private boolean flattenStruct;
     private String delimiter;
 
+    private boolean dropTombstones;
+    private DeleteHandling handleDeletes;
+
     @Override
-    public R apply(R r) {
-        String newValueSchemaName = r.valueSchema().name();
-        if (newValueSchemaName.endsWith(".Envelope")) {
-            newValueSchemaName = newValueSchemaName.substring(0, newValueSchemaName.length() - 9);
+    public R apply(R record) {
+        final R afterRecord = afterExtractor.apply(record);
+        final R patchRecord = patchExtractor.apply(record);
+        final R keyRecord = keyExtractor.apply(record);
+
+        BsonDocument keyDocument = BsonDocument.parse("{ \"id\" : " + keyRecord.key().toString() + "}");
+        BsonDocument valueDocument = new BsonDocument();
+
+        // Tombstone message
+        if (record.value() == null) {
+            if (dropTombstones) {
+                LOGGER.trace("Tombstone {} arrived and requested to be dropped", record.key());
+                return null;
+            }
+            if (addOperationHeader) {
+                record.headers().addString(DEBEZIUM_OPERATION_HEADER_KEY, Envelope.Operation.DELETE.code());
+            }
+            return newRecord(record, keyDocument, valueDocument);
         }
-        SchemaBuilder valueSchemaBuilder = SchemaBuilder.struct().name(newValueSchemaName);
-        SchemaBuilder keySchemabuilder = SchemaBuilder.struct();
-        BsonDocument valueDocument = null;
 
-        final R afterRecord = afterExtractor.apply(r);
-        final R key = keyExtractor.apply(r);
-        BsonDocument keyDocument = BsonDocument.parse("{ \"id\" : " + key.key().toString() + "}");
+        if (addOperationHeader) {
+            record.headers().addString(DEBEZIUM_OPERATION_HEADER_KEY, ((Struct) record.value()).get("op").toString());
+        }
 
-        if (afterRecord.value() == null) {
-            final R patchRecord = patchExtractor.apply(r);
-
-            // update
-            if (patchRecord.value() != null) {
-                valueDocument = BsonDocument.parse(patchRecord.value().toString());
-                valueDocument = valueDocument.getDocument("$set");
-                if (!valueDocument.containsKey("id")) {
-                    valueDocument.append("id", keyDocument.get("id"));
-                }
-                // patch already contains flattened document, there is no need for conversion
-                if (flattenStruct) {
-                    final BsonDocument newDocument = new BsonDocument();
-                    valueDocument.forEach((fKey, fValue) -> newDocument.put(fKey.replace(".", delimiter), fValue));
-                    valueDocument = newDocument;
-                }
-            }
-            // delete
-            else {
-                valueDocument = new BsonDocument();
-            }
         // insert
+        if (afterRecord.value() != null) {
+            valueDocument = getInsertDocument(afterRecord, keyDocument);
         }
-        else {
-            valueDocument = BsonDocument.parse(afterRecord.value().toString());
+
+        // update
+        if (afterRecord.value() == null && patchRecord.value() != null) {
+            valueDocument = getUpdateDocument(patchRecord, keyDocument);
+        }
+
+        boolean isDeletion = false;
+        // delete
+        if (afterRecord.value() == null && patchRecord.value() == null) {
+            if (handleDeletes.equals(DeleteHandling.DROP)) {
+                LOGGER.trace("Delete {} arrived and requested to be dropped", record.key());
+                return null;
+            }
+
+            isDeletion = true;
+        }
+
+        if (handleDeletes.equals(DeleteHandling.REWRITE)) {
+            valueDocument.append(DELETED_FIELD, new BsonBoolean(isDeletion));
+        }
+
+
+        return newRecord(record, keyDocument, valueDocument);
+    }
+
+    private R newRecord(R record, BsonDocument keyDocument, BsonDocument valueDocument) {
+        SchemaBuilder keySchemaBuilder = SchemaBuilder.struct();
+        Set<Entry<String, BsonValue>> keyPairs = keyDocument.entrySet();
+        for (Entry<String, BsonValue> keyPairsForSchema : keyPairs) {
+            converter.addFieldSchema(keyPairsForSchema, keySchemaBuilder);
+        }
+
+        Schema finalKeySchema = keySchemaBuilder.build();
+        Struct finalKeyStruct = new Struct(finalKeySchema);
+
+        for (Entry<String, BsonValue> keyPairsForStruct : keyPairs) {
+            converter.convertRecord(keyPairsForStruct, finalKeySchema, finalKeyStruct);
+        }
+
+        Schema finalValueSchema = null;
+        Struct finalValueStruct = null;
+
+        if (valueDocument.size() > 0) {
+            String newValueSchemaName = record.valueSchema().name();
+            if (newValueSchemaName.endsWith(".Envelope")) {
+                newValueSchemaName = newValueSchemaName.substring(0, newValueSchemaName.length() - 9);
+            }
+            SchemaBuilder valueSchemaBuilder = SchemaBuilder.struct().name(newValueSchemaName);
+
+            Set<Entry<String, BsonValue>> valuePairs = valueDocument.entrySet();
+            for (Entry<String, BsonValue> valuePairsForSchema : valuePairs) {
+                if (valuePairsForSchema.getKey().equalsIgnoreCase("$set")) {
+                    BsonDocument val1 = BsonDocument.parse(valuePairsForSchema.getValue().toString());
+                    Set<Entry<String, BsonValue>> keyValuesForSetSchema = val1.entrySet();
+                    for (Entry<String, BsonValue> keyValuesForSetSchemaEntry : keyValuesForSetSchema) {
+                        converter.addFieldSchema(keyValuesForSetSchemaEntry, valueSchemaBuilder);
+                    }
+                } else {
+                    converter.addFieldSchema(valuePairsForSchema, valueSchemaBuilder);
+                }
+            }
+
+            finalValueSchema = valueSchemaBuilder.build();
+            finalValueStruct = new Struct(finalValueSchema);
+            for (Entry<String, BsonValue> valuePairsForStruct : valuePairs) {
+                if (valuePairsForStruct.getKey().equalsIgnoreCase("$set")) {
+                    BsonDocument val1 = BsonDocument.parse(valuePairsForStruct.getValue().toString());
+                    Set<Entry<String, BsonValue>> keyValueForSetStruct = val1.entrySet();
+                    for (Entry<String, BsonValue> keyValueForSetStructEntry : keyValueForSetStruct) {
+                        converter.convertRecord(keyValueForSetStructEntry, finalValueSchema, finalValueStruct);
+                    }
+                } else {
+                    converter.convertRecord(valuePairsForStruct, finalValueSchema, finalValueStruct);
+                }
+            }
+        }
+
+        R newRecord = record.newRecord(record.topic(), record.kafkaPartition(), finalKeySchema,
+                finalKeyStruct, finalValueSchema, finalValueStruct, record.timestamp());
+
+        if (flattenStruct) {
+            return recordFlattener.apply(newRecord);
+        }
+
+        return newRecord;
+    }
+
+    private BsonDocument getUpdateDocument(R patchRecord, BsonDocument keyDocument) {
+        BsonDocument valueDocument = new BsonDocument();
+        BsonDocument document = BsonDocument.parse(patchRecord.value().toString());
+
+        if (document.containsKey("$set")) {
+            valueDocument = document.getDocument("$set");
+        }
+
+        if (document.containsKey("$unset")) {
+            Set<Entry<String, BsonValue>> unsetDocumentEntry = document.getDocument("$unset").entrySet();
+
+            for (Entry<String, BsonValue> valueEntry : unsetDocumentEntry) {
+                // In case unset of a key is false we don't have to do anything with it,
+                // if it's true we want to set the value to null
+                if (!valueEntry.getValue().asBoolean().getValue()) {
+                    continue;
+                }
+                valueDocument.append(valueEntry.getKey(), new BsonNull());
+            }
+        }
+
+        if (!document.containsKey("$set") && !document.containsKey("$unset")) {
+            if (!document.containsKey("_id")) {
+                throw new ConnectException("Unable to process Mongo Operation, a '$set' or '$unset' is necessary " +
+                        "for partial updates or '_id' is expected for full Document replaces.");
+            }
+            // In case of a full update we can use the whole Document as it is
+            // see https://docs.mongodb.com/manual/reference/method/db.collection.update/#replace-a-document-entirely
+            valueDocument = document;
             valueDocument.remove("_id");
+        }
+
+        if (!valueDocument.containsKey("id")) {
             valueDocument.append("id", keyDocument.get("id"));
         }
 
-        Set<Entry<String, BsonValue>> valuePairs = valueDocument.entrySet();
-        Set<Entry<String, BsonValue>> keyPairs = keyDocument.entrySet();
-
-        for (Entry<String, BsonValue> valuePairsforSchema : valuePairs) {
-            if (valuePairsforSchema.getKey().toString().equalsIgnoreCase("$set")) {
-                BsonDocument val1 = BsonDocument.parse(valuePairsforSchema.getValue().toString());
-                Set<Entry<String, BsonValue>> keyValuesforSetSchema = val1.entrySet();
-                for (Entry<String, BsonValue> keyValuesforSetSchemaEntry : keyValuesforSetSchema) {
-                    converter.addFieldSchema(keyValuesforSetSchemaEntry, valueSchemaBuilder);
-                }
-            } else {
-                converter.addFieldSchema(valuePairsforSchema, valueSchemaBuilder);
-            }
-        }
-
-        for (Entry<String, BsonValue> keyPairsforSchema : keyPairs) {
-            converter.addFieldSchema(keyPairsforSchema, keySchemabuilder);
-        }
-
-        Schema finalValueSchema = valueSchemaBuilder.build();
-        Struct finalValueStruct = new Struct(finalValueSchema);
-        Schema finalKeySchema = keySchemabuilder.build();
-        Struct finalKeyStruct = new Struct(finalKeySchema);
-
-        for (Entry<String, BsonValue> valuePairsforStruct : valuePairs) {
-            if (valuePairsforStruct.getKey().toString().equalsIgnoreCase("$set")) {
-                BsonDocument val1 = BsonDocument.parse(valuePairsforStruct.getValue().toString());
-                Set<Entry<String, BsonValue>> keyvalueforSetStruct = val1.entrySet();
-                for (Entry<String, BsonValue> keyvalueforSetStructEntry : keyvalueforSetStruct) {
-                    converter.convertRecord(keyvalueforSetStructEntry, finalValueSchema, finalValueStruct);
-                }
-            }
-            else {
-                converter.convertRecord(valuePairsforStruct, finalValueSchema, finalValueStruct);
-            }
-        }
-
-        for (Entry<String, BsonValue> keyPairsforStruct : keyPairs) {
-            converter.convertRecord(keyPairsforStruct, finalKeySchema, finalKeyStruct);
-        }
-
         if (flattenStruct) {
-           final R flattenRecord = recordFlattener.apply(r.newRecord(r.topic(), r.kafkaPartition(), finalKeySchema,
-               finalKeyStruct, finalValueSchema, finalValueStruct,r.timestamp()));
-           return flattenRecord;
+            final BsonDocument newDocument = new BsonDocument();
+            valueDocument.forEach((fKey, fValue) -> newDocument.put(fKey.replace(".", delimiter), fValue));
+            valueDocument = newDocument;
         }
-        else {
-            if (finalValueSchema.fields().isEmpty()) {
-                    return r.newRecord(r.topic(), r.kafkaPartition(), finalKeySchema, finalKeyStruct, null, null,
-                            r.timestamp());
-                }
-                else {
-                    return r.newRecord(r.topic(), r.kafkaPartition(), finalKeySchema, finalKeyStruct, finalValueSchema, finalValueStruct,
-                            r.timestamp());
-                }
-        }
+
+        return valueDocument;
+    }
+
+    private BsonDocument getInsertDocument(R record, BsonDocument key) {
+        BsonDocument valueDocument = BsonDocument.parse(record.value().toString());
+        valueDocument.remove("_id");
+        valueDocument.append("id", key.get("id"));
+
+        return valueDocument;
     }
 
     @Override
@@ -235,7 +352,7 @@ public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Tr
     @Override
     public void configure(final Map<String, ?> map) {
         final Configuration config = Configuration.from(map);
-        final Field.Set configFields = Field.setOf(ARRAY_ENCODING, FLATTEN_STRUCT, DELIMITER);
+        final Field.Set configFields = Field.setOf(ARRAY_ENCODING, FLATTEN_STRUCT, DELIMITER, OPERATION_HEADER, HANDLE_DELETES, DROP_TOMBSTONES);
 
         if (!config.validateAndRecord(configFields, LOGGER::error)) {
             throw new ConnectException("Unable to validate config.");
@@ -243,8 +360,13 @@ public class UnwrapFromMongoDbEnvelope<R extends ConnectRecord<R>> implements Tr
 
         converter = new MongoDataConverter(ArrayEncoding.parse(config.getString(ARRAY_ENCODING)));
 
+        addOperationHeader = config.getBoolean(OPERATION_HEADER);
+
         flattenStruct = config.getBoolean(FLATTEN_STRUCT);
         delimiter = config.getString(DELIMITER);
+
+        dropTombstones = config.getBoolean(DROP_TOMBSTONES);
+        handleDeletes = DeleteHandling.parse(config.getString(HANDLE_DELETES));
 
         final Map<String, String> afterExtractorConfig = new HashMap<>();
         afterExtractorConfig.put("field", "after");

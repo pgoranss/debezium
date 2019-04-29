@@ -6,13 +6,13 @@
 package io.debezium.connector.mysql;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
@@ -33,9 +33,10 @@ import io.debezium.relational.Column;
 @Immutable
 public class MySqlDefaultValuePreConverter  {
 
-    private static final Pattern ALL_ZERO_TIMESTAMP = Pattern.compile("0000-00-00 00:00:00(\\.\\d{1,6})?");
 
-    private static final String ALL_ZERO_DATE = "0000-00-00";
+    private static final Pattern EPOCH_EQUIVALENT_TIMESTAMP = Pattern.compile("(\\d{4}-\\d{2}-00|\\d{4}-00-\\d{2}|0000-\\d{2}-\\d{2}) (00:00:00(\\.\\d{1,6})?)");
+
+    private static final Pattern EPOCH_EQUIVALENT_DATE = Pattern.compile("\\d{4}-\\d{2}-00|\\d{4}-00-\\d{2}|0000-\\d{2}-\\d{2}");
 
     private static final String EPOCH_TIMESTAMP = "1970-01-01 00:00:00";
 
@@ -53,6 +54,13 @@ public class MySqlDefaultValuePreConverter  {
         if (value == null) {
             return value;
         }
+
+        // boolean is also TINYINT(1)
+        if ("TINYINT".equals(column.typeName())) {
+            if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+                return convertToBoolean(value);
+            }
+        }
         switch (column.jdbcType()) {
         case Types.DATE:
             return convertToLocalDate(column, value);
@@ -67,22 +75,14 @@ public class MySqlDefaultValuePreConverter  {
         case Types.BIT:
             return convertToBits(column, value);
 
-        case Types.TINYINT:
-        case Types.SMALLINT:
-            return convertToSmallInt(value);
-
         case Types.NUMERIC:
         case Types.DECIMAL:
-            return convertToDecimal(value);
+            return convertToDecimal(column, value);
 
         case Types.FLOAT:
         case Types.DOUBLE:
         case Types.REAL:
             return convertToDouble(value);
-        case Types.BIGINT:
-            return convertToBigInt(value);
-        case Types.INTEGER:
-            return convertToInteger(value);
         }
         return value;
     }
@@ -97,7 +97,7 @@ public class MySqlDefaultValuePreConverter  {
      * @return the converted value;
      */
     private Object convertToLocalDate(Column column, String value) {
-        final boolean zero = ALL_ZERO_DATE.equals(value) || "0".equals(value);
+        final boolean zero = EPOCH_EQUIVALENT_DATE.matcher(value).matches() || "0".equals(value);
         if (zero && column.isOptional()) {
             return null;
         }
@@ -117,7 +117,7 @@ public class MySqlDefaultValuePreConverter  {
      * @return the converted value;
      */
     private Object convertToLocalDateTime(Column column, String value) {
-        final boolean matches = ALL_ZERO_TIMESTAMP.matcher(value).matches() || "0".equals(value);
+        final boolean matches = EPOCH_EQUIVALENT_TIMESTAMP.matcher(value).matches() || "0".equals(value);
         if (matches) {
             if (column.isOptional()) {
                 return null;
@@ -139,7 +139,7 @@ public class MySqlDefaultValuePreConverter  {
      * @return the converted value;
      */
     private Object convertToTimestamp(Column column, String value) {
-        final boolean matches = ALL_ZERO_TIMESTAMP.matcher(value).matches() || "0".equals(value) || EPOCH_TIMESTAMP.equals(value);
+        final boolean matches = EPOCH_EQUIVALENT_TIMESTAMP.matcher(value).matches() || "0".equals(value) || EPOCH_TIMESTAMP.equals(value);
         if (matches) {
             if (column.isOptional()) {
                 return null;
@@ -158,27 +158,7 @@ public class MySqlDefaultValuePreConverter  {
      * @return the converted value;
      */
     private Object convertToDuration(Column column, String value) {
-        return Duration.between(LocalTime.MIN, LocalTime.from(timeFormat(column.length()).parse(value)));
-    }
-
-    /**
-     * Converts a string object for an expected JDBC type of {@link Types#INTEGER}.
-     *
-     * @param value the string object to be converted into a {@link Types#INTEGER} type;
-     * @return the converted value;
-     */
-    private Object convertToInteger(String value) {
-        return Integer.parseInt(value);
-    }
-
-    /**
-     * Converts a string object for an expected JDBC type of {@link Types#INTEGER}.
-     *
-     * @param value the string object to be converted into a {@link Types#INTEGER} type;
-     * @return the converted value;
-     */
-    private Object convertToBigInt(String value) {
-        return Long.valueOf(value);
+        return MySqlValueConverters.stringToDuration(value);
     }
 
     /**
@@ -194,11 +174,14 @@ public class MySqlDefaultValuePreConverter  {
     /**
      * Converts a string object for an expected JDBC type of {@link Types#DECIMAL}.
      *
+     * @param column the column definition describing the {@code data} value; never null
      * @param value the string object to be converted into a {@link Types#DECIMAL} type;
      * @return the converted value;
      */
-    private Object convertToDecimal(String value) {
-        return new BigDecimal(value);
+    private Object convertToDecimal(Column column, String value) {
+        return column.scale().isPresent() ?
+                new BigDecimal(value).setScale(column.scale().get(), RoundingMode.HALF_UP) :
+                new BigDecimal(value);
     }
 
     /**
@@ -229,20 +212,10 @@ public class MySqlDefaultValuePreConverter  {
         for (int i = 0; i < nums; i++) {
             int s = value.length() - Byte.SIZE < 0 ? 0 : value.length() - Byte.SIZE;
             int e = value.length();
-            bytes[nums - i - 1] = Byte.parseByte(value.substring(s, e), 2);
+            bytes[nums - i - 1] = (byte) Integer.parseInt(value.substring(s, e), 2);
             value = value.substring(0, s);
         }
         return bytes;
-    }
-
-    /**
-     * Converts a string object for an expected JDBC type of {@link Types#SMALLINT}.
-     *
-     * @param value the string object to be converted into a {@link Types#SMALLINT} type;
-     * @return the converted value;
-     */
-    private Object convertToSmallInt(String value) {
-        return Short.parseShort(value);
     }
 
     /**
@@ -259,19 +232,10 @@ public class MySqlDefaultValuePreConverter  {
         }
     }
 
-    private DateTimeFormatter timeFormat(int length) {
-        final DateTimeFormatterBuilder dtf = new DateTimeFormatterBuilder()
-                .appendPattern("HH:mm:ss");
-        if (length !=-1) {
-            dtf.appendFraction(ChronoField.MICRO_OF_SECOND, 0, length, true);
-        }
-        return dtf.toFormatter();
-    }
-
     private DateTimeFormatter timestampFormat(int length) {
         final DateTimeFormatterBuilder dtf = new DateTimeFormatterBuilder()
                 .appendPattern("yyyy-MM-dd HH:mm:ss");
-        if (length !=-1) {
+        if (length > 0) {
             dtf.appendFraction(ChronoField.MICRO_OF_SECOND, 0, length, true);
         }
         return dtf.toFormatter();

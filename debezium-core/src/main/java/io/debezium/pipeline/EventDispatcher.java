@@ -18,8 +18,10 @@ import io.debezium.config.CommonConnectorConfig;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.data.Envelope.Operation;
 import io.debezium.heartbeat.Heartbeat;
+import io.debezium.pipeline.source.spi.DataChangeEventListener;
 import io.debezium.pipeline.spi.ChangeEventCreator;
 import io.debezium.pipeline.spi.ChangeRecordEmitter;
+import io.debezium.pipeline.spi.ChangeRecordEmitter.Receiver;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.spi.SchemaChangeEventEmitter;
 import io.debezium.schema.DataCollectionFilters.DataCollectionFilter;
@@ -50,6 +52,7 @@ public class EventDispatcher<T extends DataCollectionId> {
     private final DataCollectionFilter<T> filter;
     private final ChangeEventCreator changeEventCreator;
     private final Heartbeat heartbeat;
+    private DataChangeEventListener eventListener = DataChangeEventListener.NO_OP;
 
     /**
      * Change event receiver for events dispatched from a streaming change event source.
@@ -73,13 +76,8 @@ public class EventDispatcher<T extends DataCollectionId> {
                 connectorConfig.getLogicalName());
     }
 
-    // TODO One could argue that snapshot events shouldn't have to go through the dispatcher but rather to the queue
-    // directly; It's done though in order to handle heartbeat, JMX and other things consistently with streaming, so
-    // it might be beneficial eventually
     public void dispatchSnapshotEvent(T dataCollectionId, ChangeRecordEmitter changeRecordEmitter, SnapshotReceiver receiver) throws InterruptedException {
         // TODO Handle Heartbeat
-
-        // TODO Handle JMX
 
         DataCollectionSchema dataCollectionSchema = schema.schemaFor(dataCollectionId);
 
@@ -88,7 +86,15 @@ public class EventDispatcher<T extends DataCollectionId> {
             throw new IllegalArgumentException("No metadata registered for captured table " + dataCollectionId);
         }
 
-        changeRecordEmitter.emitChangeRecords(dataCollectionSchema, receiver);
+        changeRecordEmitter.emitChangeRecords(dataCollectionSchema, new Receiver() {
+
+            @Override
+            public void changeRecord(DataCollectionSchema schema, Operation operation, Object key, Struct value,
+                    OffsetContext offset) throws InterruptedException {
+                eventListener.onEvent(dataCollectionSchema.id(), offset, key, value);
+                receiver.changeRecord(dataCollectionSchema, operation, key, value, offset);
+            }
+        });
     }
 
     public SnapshotReceiver getSnapshotChangeEventReceiver() {
@@ -103,10 +109,10 @@ public class EventDispatcher<T extends DataCollectionId> {
      * {@link ChangeEventCreator} for converting them into data change events.
      */
     public void dispatchDataChangeEvent(T dataCollectionId, ChangeRecordEmitter changeRecordEmitter) throws InterruptedException {
-        // TODO Handle JMX
 
         if(!filter.isIncluded(dataCollectionId)) {
-            LOGGER.trace("Skipping data change event for {}", dataCollectionId);
+            LOGGER.trace("Filtered data change event for {}", dataCollectionId);
+            eventListener.onFilteredEvent("source = " + dataCollectionId);
         }
         else {
             DataCollectionSchema dataCollectionSchema = schema.schemaFor(dataCollectionId);
@@ -116,7 +122,15 @@ public class EventDispatcher<T extends DataCollectionId> {
                 throw new IllegalArgumentException("No metadata registered for captured table " + dataCollectionId);
             }
 
-            changeRecordEmitter.emitChangeRecords(dataCollectionSchema, streamingReceiver);
+            changeRecordEmitter.emitChangeRecords(dataCollectionSchema, new Receiver() {
+
+                @Override
+                public void changeRecord(DataCollectionSchema schema, Operation operation, Object key, Struct value,
+                        OffsetContext offset) throws InterruptedException {
+                    eventListener.onEvent(dataCollectionId, offset, key, value);
+                    streamingReceiver.changeRecord(schema, operation, key, value, offset);
+                }
+            });
         }
 
         heartbeat.heartbeat(
@@ -128,7 +142,7 @@ public class EventDispatcher<T extends DataCollectionId> {
 
     public void dispatchSchemaChangeEvent(T dataCollectionId, SchemaChangeEventEmitter schemaChangeEventEmitter) throws InterruptedException {
         if(!filter.isIncluded(dataCollectionId)) {
-            LOGGER.trace("Skipping data change event for {}", dataCollectionId);
+            LOGGER.trace("Filtering schema change event for {}", dataCollectionId);
             return;
         }
 
@@ -234,5 +248,14 @@ public class EventDispatcher<T extends DataCollectionId> {
         public void schemaChangeEvent(SchemaChangeEvent event) throws InterruptedException {
             historizedSchema.applySchemaChange(event);
         }
+    }
+
+    /**
+     * Provide a listener that is invoked for every incoming event to be processed.
+     *
+     * @param eventListener
+     */
+    public void setEventListener(DataChangeEventListener eventListener) {
+        this.eventListener = eventListener;
     }
 }

@@ -32,12 +32,12 @@ import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
-import io.debezium.connector.mysql.MySqlConnectorConfig.DecimalHandlingMode;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
 import io.debezium.data.Envelope;
 import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
 import io.debezium.jdbc.TemporalPrecisionMode;
+import io.debezium.relational.RelationalDatabaseConnectorConfig.DecimalHandlingMode;
 import io.debezium.time.ZonedTimestamp;
 import io.debezium.util.Testing;
 
@@ -549,14 +549,13 @@ public class MySqlConnectorRegressionIT extends AbstractConnectorTest {
         // Consume all of the events due to startup and initialization of the database
         // ---------------------------------------------------------------------------------------------------------------
         // Testing.Debug.enable();
-        int numCreateDatabase = 1;
         int numTables = 11;
         int numDataRecords = 20;
         int numDdlRecords = numTables * 2 + 3; // for each table (1 drop + 1 create) + for each db (1 create + 1 drop + 1 use)
         int numCreateDefiner = 1;
         int numSetVariables = 1;
         SourceRecords records =
-            consumeRecordsByTopic(numDdlRecords + numSetVariables + numDataRecords + numCreateDefiner + numCreateDatabase);
+            consumeRecordsByTopic(numDdlRecords + numSetVariables + numDataRecords);
         stopConnector();
         assertThat(records).isNotNull();
         assertThat(records.recordsForTopic(DATABASE.getServerName()).size())
@@ -927,7 +926,7 @@ public class MySqlConnectorRegressionIT extends AbstractConnectorTest {
                 // { "c2" : "17:51:04.777" }
                 Integer c2 = after.getInt32("c2");
                 long expectedMillis = Duration.ofHours(17).plusMinutes(51).plusSeconds(4).plusMillis(780).toMillis();
-                assertThat(c2).isEqualTo((int)expectedMillis);
+                assertThat(c2).isEqualTo((int) expectedMillis);
             }
         });
     }

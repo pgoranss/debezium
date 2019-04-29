@@ -11,12 +11,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import io.debezium.data.Envelope;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.header.Header;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
@@ -48,6 +51,9 @@ public class UnwrapFromMongoDbEnvelopeTest {
     private static final String SERVER_NAME = "serverX";
     private static final String FLATTEN_STRUCT = "flatten.struct";
     private static final String DELIMITER = "flatten.struct.delimiter";
+    private static final String OPERATION_HEADER = "operation.header";
+    private static final String HANDLE_DELETES = "delete.handling.mode";
+    private static final String DROP_TOMBSTONE = "drop.tombstones";
 
     private Filters filters;
     private SourceInfo source;
@@ -96,9 +102,19 @@ public class UnwrapFromMongoDbEnvelopeTest {
         assertThat(produced.size()).isEqualTo(1);
         SourceRecord record = produced.get(0);
 
+        final Map<String, String> props = new HashMap<>();
+        props.put(OPERATION_HEADER, "true");
+        transformation.configure(props);
+
         // when
         SourceRecord transformed = transformation.apply(record);
 
+        // then assert operation header is insert
+        Iterator<Header> operationHeader = transformed.headers().allWithName(transformation.DEBEZIUM_OPERATION_HEADER_KEY);
+        assertThat((operationHeader).hasNext()).isTrue();
+        assertThat(operationHeader.next().value().toString()).isEqualTo(Envelope.Operation.CREATE.code());
+
+        // acquire key and value Structs
         Struct key = (Struct) transformed.key();
         Struct value = (Struct) transformed.value();
 
@@ -152,13 +168,13 @@ public class UnwrapFromMongoDbEnvelopeTest {
         assertThat(key.schema()).isSameAs(transformed.keySchema());
         assertThat(key.schema().field("id").schema().field("company").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
         assertThat(key.schema().field("id").schema().field("dept").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
-        assertThat(((Struct)key.get("id")).get("company")).isEqualTo(32);
-        assertThat(((Struct)key.get("id")).get("dept")).isEqualTo("home improvement");
+        assertThat(((Struct) key.get("id")).get("company")).isEqualTo(32);
+        assertThat(((Struct) key.get("id")).get("dept")).isEqualTo("home improvement");
 
         // and then assert value and its schema
         assertThat(value.schema()).isSameAs(transformed.valueSchema());
-        assertThat(((Struct)value.get("id")).get("company")).isEqualTo(32);
-        assertThat(((Struct)value.get("id")).get("dept")).isEqualTo("home improvement");
+        assertThat(((Struct) value.get("id")).get("company")).isEqualTo(32);
+        assertThat(((Struct) value.get("id")).get("dept")).isEqualTo("home improvement");
         assertThat(value.get("name")).isEqualTo("Sally");
 
         assertThat(value.schema().field("id").schema().field("company").schema()).isEqualTo(SchemaBuilder.OPTIONAL_INT32_SCHEMA);
@@ -166,6 +182,7 @@ public class UnwrapFromMongoDbEnvelopeTest {
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().fields()).hasSize(2);
     }
+
     @Test
     public void shouldGenerateRecordForUpdateEvent() throws InterruptedException {
         BsonTimestamp ts = new BsonTimestamp(1000, 1);
@@ -185,9 +202,19 @@ public class UnwrapFromMongoDbEnvelopeTest {
         assertThat(produced.size()).isEqualTo(1);
         SourceRecord record = produced.get(0);
 
+        final Map<String, String> props = new HashMap<>();
+        props.put(OPERATION_HEADER, "true");
+        transformation.configure(props);
+
         // when
         SourceRecord transformed = transformation.apply(record);
 
+        // then assert operation header is update
+        Iterator<Header> operationHeader = transformed.headers().allWithName(transformation.DEBEZIUM_OPERATION_HEADER_KEY);
+        assertThat((operationHeader).hasNext()).isTrue();
+        assertThat(operationHeader.next().value().toString()).isEqualTo(Envelope.Operation.UPDATE.code());
+
+        // acquire key and value Structs
         Struct key = (Struct) transformed.key();
         Struct value = (Struct) transformed.value();
 
@@ -203,6 +230,78 @@ public class UnwrapFromMongoDbEnvelopeTest {
 
         assertThat(value.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().field("name").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().fields()).hasSize(2);
+    }
+
+    @Test
+    @FixFor("DBZ-612")
+    public void shouldGenerateRecordForUpdateEventWithUnset() throws InterruptedException {
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document()
+                .append("$set", new Document("name", "Sally"))
+                .append("$unset", new Document().append("phone", true).append("active", false))
+                ;
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("o2", objId)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "u");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(1);
+        SourceRecord record = produced.get(0);
+
+        // when
+        SourceRecord transformed = transformation.apply(record);
+
+        Struct value = (Struct) transformed.value();
+
+        // and then assert value and its schema
+        assertThat(value.schema()).isSameAs(transformed.valueSchema());
+        assertThat(value.get("name")).isEqualTo("Sally");
+        assertThat(value.get("phone")).isEqualTo(null);
+
+        assertThat(value.schema().field("phone").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(value.schema().fields()).hasSize(3);
+    }
+
+    @Test
+    @FixFor("DBZ-612")
+    public void shouldGenerateRecordForUnsetOnlyUpdateEvent() throws InterruptedException {
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document()
+                .append("$unset", new Document().append("phone", true).append("active", false))
+                ;
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("o2", objId)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "u");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(1);
+        SourceRecord record = produced.get(0);
+
+        // when
+        SourceRecord transformed = transformation.apply(record);
+
+        Struct value = (Struct) transformed.value();
+
+        // and then assert value and its schema
+        assertThat(value.schema()).isSameAs(transformed.valueSchema());
+        assertThat(value.get("phone")).isEqualTo(null);
+
+        assertThat(value.schema().field("phone").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
         assertThat(value.schema().fields()).hasSize(2);
     }
 
@@ -228,6 +327,10 @@ public class UnwrapFromMongoDbEnvelopeTest {
 
         SourceRecord record = produced.get(0);
 
+        final Map<String, String> props = new HashMap<>();
+        props.put(HANDLE_DELETES, "none");
+        transformation.configure(props);
+
         // when
         SourceRecord transformed = transformation.apply(record);
 
@@ -240,6 +343,159 @@ public class UnwrapFromMongoDbEnvelopeTest {
         assertThat(key.get("id")).isEqualTo(objId.toString());
 
         assertThat(value).isNull();
+    }
+
+    @Test
+    @FixFor("DBZ-1032")
+    public void shouldGenerateRecordHeaderForTombstone() throws InterruptedException {
+        // ensure tombstone is produced
+        RecordMakers recordMakers = new RecordMakers(filters, source, topicSelector, produced::add, true);
+
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document("_id", objId);
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "d");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(2);
+
+        // the second message is the tombstone
+        SourceRecord record = produced.get(1);
+
+        final Map<String, String> props = new HashMap<>();
+        props.put(OPERATION_HEADER, "true");
+        props.put(DROP_TOMBSTONE, "false");
+        transformation.configure(props);
+
+        // when
+        SourceRecord transformed = transformation.apply(record);
+
+        Struct key = (Struct) transformed.key();
+        Struct value = (Struct) transformed.value();
+
+        // then assert key and its schema
+        assertThat(key.schema()).isSameAs(transformed.keySchema());
+        assertThat(key.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(key.get("id")).isEqualTo(objId.toString());
+
+        // then assert operation header is delete
+        Iterator<Header> operationHeader = transformed.headers().allWithName(transformation.DEBEZIUM_OPERATION_HEADER_KEY);
+        assertThat((operationHeader).hasNext()).isTrue();
+        assertThat(operationHeader.next().value().toString()).isEqualTo(Envelope.Operation.DELETE.code());
+
+        assertThat(value).isNull();
+    }
+
+
+    @Test
+    @FixFor("DBZ-583")
+    public void shouldDropDeleteMessagesByDefault() throws InterruptedException {
+        RecordMakers recordMakers = new RecordMakers(filters, source, topicSelector, produced::add, false);
+
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document("_id", objId);
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "d");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(1);
+
+        SourceRecord record = produced.get(0);
+
+        // when
+        SourceRecord transformed = transformation.apply(record);
+
+        // then assert transformed message is skipped
+        assertThat(transformed).isNull();
+    }
+
+    @Test
+    @FixFor("DBZ-583")
+    public void shouldRewriteDeleteMessage() throws InterruptedException {
+        RecordMakers recordMakers = new RecordMakers(filters, source, topicSelector, produced::add, false);
+
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document("_id", objId);
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "d");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(1);
+
+        SourceRecord record = produced.get(0);
+
+        final Map<String, String> props = new HashMap<>();
+        props.put(HANDLE_DELETES, "rewrite");
+        transformation.configure(props);
+
+        // when
+        SourceRecord transformed = transformation.apply(record);
+
+        Struct key = (Struct) transformed.key();
+        Struct value = (Struct) transformed.value();
+
+        // then assert key and its schema
+        assertThat(key.schema()).isSameAs(transformed.keySchema());
+        assertThat(key.schema().field("id").schema()).isEqualTo(SchemaBuilder.OPTIONAL_STRING_SCHEMA);
+        assertThat(key.get("id")).isEqualTo(objId.toString());
+
+        assertThat(value.schema().field("__deleted").schema()).isEqualTo(SchemaBuilder.OPTIONAL_BOOLEAN_SCHEMA);
+        assertThat(value.get("__deleted")).isEqualTo(true);
+    }
+
+    @Test
+    @FixFor("DBZ-583")
+    public void shouldRewriteMessagesWhichAreNotDeletes() throws InterruptedException {
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document().append("$set", new Document("name", "Sally"));
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("o2", objId)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "u");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(1);
+        SourceRecord record = produced.get(0);
+
+        final Map<String, String> props = new HashMap<>();
+        props.put(HANDLE_DELETES, "rewrite");
+        transformation.configure(props);
+
+        // when
+        SourceRecord transformedRecord = transformation.apply(record);
+
+        Struct value = (Struct) transformedRecord.value();
+
+        // then assert value and its schema
+        assertThat(value.schema().field("__deleted").schema()).isEqualTo(SchemaBuilder.OPTIONAL_BOOLEAN_SCHEMA);
+        assertThat(value.get("__deleted")).isEqualTo(false);
     }
 
     @Test
@@ -261,9 +517,20 @@ public class UnwrapFromMongoDbEnvelopeTest {
 
         SourceRecord record = produced.get(0);
 
+        final Map<String, String> props = new HashMap<>();
+        props.put(OPERATION_HEADER, "true");
+        props.put(HANDLE_DELETES, "none");
+        transformation.configure(props);
+
         // when
         SourceRecord transformed = transformation.apply(record);
 
+        // then assert operation header is delete
+        Iterator<Header> operationHeader = transformed.headers().allWithName(transformation.DEBEZIUM_OPERATION_HEADER_KEY);
+        assertThat((operationHeader).hasNext()).isTrue();
+        assertThat(operationHeader.next().value().toString()).isEqualTo(Envelope.Operation.DELETE.code());
+
+        // acquire key and value Structs
         Struct key = (Struct) transformed.key();
         Struct value = (Struct) transformed.value();
 
@@ -273,6 +540,36 @@ public class UnwrapFromMongoDbEnvelopeTest {
         assertThat(key.get("id")).isEqualTo(objId.toString());
 
         assertThat(value).isNull();
+    }
+
+    @Test
+    @FixFor("DBZ-971")
+    public void shouldPropagatePreviousRecordHeaders() throws InterruptedException {
+        BsonTimestamp ts = new BsonTimestamp(1000, 1);
+        CollectionId collectionId = new CollectionId("rs0", "dbA", "c1");
+        ObjectId objId = new ObjectId();
+        Document obj = new Document().append("$set", new Document("name", "Sally"));
+
+        // given
+        Document event = new Document().append("o", obj)
+                .append("o2", objId)
+                .append("ns", "dbA.c1")
+                .append("ts", ts)
+                .append("h", Long.valueOf(12345678))
+                .append("op", "u");
+        RecordsForCollection records = recordMakers.forCollection(collectionId);
+        records.recordEvent(event, 1002);
+        assertThat(produced.size()).isEqualTo(1);
+        SourceRecord record = produced.get(0);
+        record.headers().addString("application/debezium-test-header", "shouldPropagatePreviousRecordHeaders");
+
+        // when
+        SourceRecord transformedRecord = transformation.apply(record);
+
+        assertThat(transformedRecord.headers()).hasSize(1);
+        Iterator<Header> headers = transformedRecord.headers().allWithName("application/debezium-test-header");
+        assertThat(headers.hasNext()).isTrue();
+        assertThat(headers.next().value().toString()).isEqualTo("shouldPropagatePreviousRecordHeaders");
     }
 
     @Test

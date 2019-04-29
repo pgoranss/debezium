@@ -1,6 +1,29 @@
-## Contributing to Debezium
+# Contributing to Debezium
 
 The Debezium community welcomes anyone that wants to help out in any way, whether that includes reporting problems, helping with documentation, or contributing code changes to fix bugs, add tests, or implement new features. This document outlines the basic steps required to work with and contribute to the Debezium codebase.
+
+## Table of contents
+
+- [Talk to us](#talk-to-us)
+  - [User chat](https://gitter.im/debezium/user)
+  - [Developers chat](https://gitter.im/debezium/user) - Only for internal development subjects
+  - [Google Group](https://groups.google.com/forum/#!forum/debezium)
+  - [JIRA](https://issues.jboss.org/projects/DBZ/issues/) - You can [create an account for free](https://developer.jboss.org/register.jspa)
+- [Install the tools](#install-the-tools)
+- Repository
+  - [GitHub account](#github-account)
+  - [Fork the Debezium repository](#fork-the-debezium-repository)
+  - [Clone your fork](#clone-your-fork)
+  - [Get the latest upstream code](#get-the-latest-upstream-code)
+- Local development
+  - [Building locally](#building-locally)
+  - [Running and debugging tests](#running-and-debugging-tests)
+  - [Making changes](#making-changes)
+  - [Rebasing](#rebasing)
+- Proposing the changes
+  - [Creating a pull request](#creating-a-pull-request)
+  - [Continuous Integration](#continuous-integration)
+  - [Summary](#summary)
 
 ### Talk to us
 
@@ -181,6 +204,16 @@ and in your fork:
 
 (This last command is a bit strange, but it basically is pushing an empty branch (the space before the `:` character) to the named branch. Pushing an empty branch is the same thing as removing it.)
 
+### Continuous Integration
+
+The project currently builds its jobs in two environments:
+
+- Travis CI for pull requests: https://travis-ci.org/debezium/debezium/builds
+  - Tests run only against the current version of each supported database
+- Jenkins CI for tests matrix, deployment, release, etc - http://ci.hibernate.org/view/Debezium/
+  - Test run against all database versions supported by the individual connectors
+  - Test Kafka versions
+  - Deploy and release
 
 ### Summary
 

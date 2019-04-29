@@ -19,25 +19,37 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+import static io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIsNot.DecoderPluginName.WAL2JSON;
+import static io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIs.DecoderPluginName.DECODERBUFS;
+
+import io.debezium.connector.postgresql.connection.PostgresConnection;
+import io.debezium.connector.postgresql.connection.ReplicationConnection;
+import io.debezium.connector.postgresql.junit.SkipTestDependingOnDecoderPluginNameRule;
+import io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIs;
+import io.debezium.connector.postgresql.junit.SkipWhenDecoderPluginNameIsNot;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.source.SourceRecord;
+import org.fest.assertions.Assertions;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestRule;
 
 import io.debezium.config.CommonConnectorConfig;
+import io.debezium.connector.postgresql.PostgresConnectorConfig.SchemaRefreshMode;
 import io.debezium.data.Envelope;
 import io.debezium.data.VariableScaleDecimal;
 import io.debezium.data.VerifyRecord;
 import io.debezium.doc.FixFor;
 import io.debezium.heartbeat.Heartbeat;
+import io.debezium.jdbc.TemporalPrecisionMode;
 import io.debezium.junit.ConditionalFail;
 import io.debezium.junit.ShouldFailWhen;
+import io.debezium.relational.Table;
 import io.debezium.relational.TableId;
 import io.debezium.schema.TopicSelector;
 
@@ -54,10 +66,17 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     private final Consumer<Throwable> blackHole = t -> {};
 
     @Rule
+    public final TestRule skip = new SkipTestDependingOnDecoderPluginNameRule();
+
+    @Rule
     public TestRule conditionalFail = new ConditionalFail();
 
     @Before
     public void before() throws Exception {
+        // ensure the slot is deleted for each test
+        try (PostgresConnection conn = TestHelper.create()) {
+            conn.dropReplicationSlot(ReplicationConnection.Builder.DEFAULT_SLOT_NAME);
+        }
         TestHelper.dropAllSchemas();
         TestHelper.executeDDL("init_postgis.ddl");
         String statements =
@@ -68,7 +87,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                 "INSERT INTO test_table(text) VALUES ('insert');";
         TestHelper.execute(statements);
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
-                .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, false)
                 .with(PostgresConnectorConfig.SCHEMA_BLACKLIST, "postgis")
                 .build());
         setupRecordsProducer(config);
@@ -89,49 +108,130 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         recordsProducer.start(consumer, blackHole);
 
         //numerical types
-        assertInsert(INSERT_NUMERIC_TYPES_STMT, schemasAndValuesForNumericType());
+        assertInsert(INSERT_NUMERIC_TYPES_STMT, 1, schemasAndValuesForNumericType());
 
         //numerical decimal types
         consumer.expects(1);
-        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT_NO_NAN, schemasAndValuesForBigDecimalEncodedNumericTypes());
+        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT_NO_NAN, 1, schemasAndValuesForBigDecimalEncodedNumericTypes());
 
         // string types
         consumer.expects(1);
-        assertInsert(INSERT_STRING_TYPES_STMT, schemasAndValuesForStringTypes());
+        assertInsert(INSERT_STRING_TYPES_STMT, 1, schemasAndValuesForStringTypes());
 
         // monetary types
         consumer.expects(1);
-        assertInsert(INSERT_CASH_TYPES_STMT,  schemaAndValuesForMoneyTypes());
+        assertInsert(INSERT_CASH_TYPES_STMT, 1, schemaAndValuesForMoneyTypes());
 
         // bits and bytes
         consumer.expects(1);
-        assertInsert(INSERT_BIN_TYPES_STMT, schemaAndValuesForBinTypes());
+        assertInsert(INSERT_BIN_TYPES_STMT, 1, schemaAndValuesForBinTypes());
 
         //date and time
         consumer.expects(1);
-        assertInsert(INSERT_DATE_TIME_TYPES_STMT, schemaAndValuesForDateTimeTypes());
+        assertInsert(INSERT_DATE_TIME_TYPES_STMT, 1, schemaAndValuesForDateTimeTypes());
 
         // text
         consumer.expects(1);
-        assertInsert(INSERT_TEXT_TYPES_STMT, schemasAndValuesForTextTypes());
+        assertInsert(INSERT_TEXT_TYPES_STMT, 1, schemasAndValuesForTextTypes());
 
         // geom types
         consumer.expects(1);
-        assertInsert(INSERT_GEOM_TYPES_STMT, schemaAndValuesForGeomTypes());
+        assertInsert(INSERT_GEOM_TYPES_STMT, 1, schemaAndValuesForGeomTypes());
 
-        // timezone range types
+        // range types
         consumer.expects(1);
-        assertInsert(INSERT_TSTZRANGE_TYPES_STMT, schemaAndValuesForTstzRangeTypes());
+        assertInsert(INSERT_RANGE_TYPES_STMT, 1, schemaAndValuesForRangeTypes());
+    }
+
+    @Test
+    public void shouldReceiveChangesForInsertsCustomTypes() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                .with(PostgresConnectorConfig.SCHEMA_BLACKLIST, "postgis")
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
 
         // custom types + null value
+        assertInsert(INSERT_CUSTOM_TYPES_STMT, 1, schemasAndValuesForCustomTypes());
+
+    }
+
+    @Test
+    @FixFor("DBZ-1141")
+    public void shouldProcessNotNullColumnsConnectDateTypes() throws Exception {
+        final Struct before = testProcessNotNullColumns(TemporalPrecisionMode.CONNECT);
+        if (before != null) {
+            Assertions.assertThat(before.get("created_at")).isEqualTo(new java.util.Date(0));
+            Assertions.assertThat(before.get("created_at_tz")).isEqualTo("1970-01-01T00:00:00Z");
+            Assertions.assertThat(before.get("ctime")).isEqualTo(new java.util.Date(0));
+            Assertions.assertThat(before.get("ctime_tz")).isEqualTo("00:00:00Z");
+            Assertions.assertThat(before.get("cdate")).isEqualTo(new java.util.Date(0));
+            Assertions.assertThat(before.get("cmoney")).isEqualTo(new BigDecimal("0.00"));
+            Assertions.assertThat(before.get("cbits")).isEqualTo(new byte[0]);
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-1141")
+    public void shouldProcessNotNullColumnsAdaptiveDateTypes() throws Exception {
+        final Struct before = testProcessNotNullColumns(TemporalPrecisionMode.ADAPTIVE);
+        if (before != null) {
+            Assertions.assertThat(before.get("created_at")).isEqualTo(0L);
+            Assertions.assertThat(before.get("created_at_tz")).isEqualTo("1970-01-01T00:00:00Z");
+            Assertions.assertThat(before.get("ctime")).isEqualTo(0L);
+            Assertions.assertThat(before.get("ctime_tz")).isEqualTo("00:00:00Z");
+            Assertions.assertThat(before.get("cdate")).isEqualTo(0);
+            Assertions.assertThat(before.get("cmoney")).isEqualTo(new BigDecimal("0.00"));
+            Assertions.assertThat(before.get("cbits")).isEqualTo(new byte[0]);
+        }
+    }
+
+    @Test
+    @FixFor("DBZ-1141")
+    public void shouldProcessNotNullColumnsAdaptiveMsDateTypes() throws Exception {
+        final Struct before = testProcessNotNullColumns(TemporalPrecisionMode.ADAPTIVE_TIME_MICROSECONDS);
+        if (before != null) {
+            Assertions.assertThat(before.get("created_at")).isEqualTo(0L);
+            Assertions.assertThat(before.get("created_at_tz")).isEqualTo("1970-01-01T00:00:00Z");
+            Assertions.assertThat(before.get("ctime")).isEqualTo(0L);
+            Assertions.assertThat(before.get("ctime_tz")).isEqualTo("00:00:00Z");
+            Assertions.assertThat(before.get("cdate")).isEqualTo(0);
+            Assertions.assertThat(before.get("cmoney")).isEqualTo(new BigDecimal("0.00"));
+            Assertions.assertThat(before.get("cbits")).isEqualTo(new byte[0]);
+        }
+    }
+
+    private Struct testProcessNotNullColumns(TemporalPrecisionMode temporalMode) throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                .with(PostgresConnectorConfig.SCHEMA_BLACKLIST, "postgis")
+                .with(PostgresConnectorConfig.TIME_PRECISION_MODE, temporalMode)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        executeAndWait("INSERT INTO not_null_table VALUES (default, 30, '2019-02-10 11:34:58', '2019-02-10 11:35:00', '10:20:11', '10:20:12', '2019-02-01', '$20', B'101')");
+        consumer.remove();
+
         consumer.expects(1);
-        assertInsert(INSERT_CUSTOM_TYPES_STMT, schemasAndValuesForCustomTypes());
+        executeAndWait("UPDATE not_null_table SET val=40");
+        final SourceRecord record = consumer.remove();
+        VerifyRecord.isValidUpdate(record, "pk", 1);
+        VerifyRecord.isValid(record);
+        return ((Struct) record.value()).getStruct("before");
     }
 
     @Test(timeout = 30000)
     public void shouldReceiveChangesForInsertsWithPostgisTypes() throws Exception {
         TestHelper.executeDDL("postgis_create_tables.ddl");
-        consumer = testConsumer(1, "public"); // spatial_ref_sys produces a tonne of records in the postgis schema
+        consumer = testConsumer(1, "public"); // spatial_ref_sys produces a ton of records in the postgis schema
         consumer.setIgnoreExtraRecords(true);
         recordsProducer.start(consumer, blackHole);
 
@@ -151,13 +251,13 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         // now do it for actual testing
         // postgis types
         consumer.expects(1);
-        assertInsert(INSERT_POSTGIS_TYPES_STMT, schemaAndValuesForPostgisTypes());
+        assertInsert(INSERT_POSTGIS_TYPES_STMT, 1, schemaAndValuesForPostgisTypes());
     }
 
     @Test(timeout = 30000)
     public void shouldReceiveChangesForInsertsWithPostgisArrayTypes() throws Exception {
         TestHelper.executeDDL("postgis_create_tables.ddl");
-        consumer = testConsumer(1, "public"); // spatial_ref_sys produces a tonne of records in the postgis schema
+        consumer = testConsumer(1, "public"); // spatial_ref_sys produces a ton of records in the postgis schema
         consumer.setIgnoreExtraRecords(true);
         recordsProducer.start(consumer, blackHole);
 
@@ -177,7 +277,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         // now do it for actual testing
         // postgis types
         consumer.expects(1);
-        assertInsert(INSERT_POSTGIS_ARRAY_TYPES_STMT, schemaAndValuesForPostgisArrayTypes());
+        assertInsert(INSERT_POSTGIS_ARRAY_TYPES_STMT, 1, schemaAndValuesForPostgisArrayTypes());
     }
 
     @Test
@@ -190,7 +290,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         recordsProducer.start(consumer, blackHole);
 
         // Quoted column name
-        assertInsert(INSERT_QUOTED_TYPES_STMT, schemasAndValuesForQuotedTypes());
+        assertInsert(INSERT_QUOTED_TYPES_STMT, 1, schemasAndValuesForQuotedTypes());
     }
 
     @Test
@@ -200,7 +300,35 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer = testConsumer(1);
         recordsProducer.start(consumer, blackHole);
 
-        assertInsert(INSERT_ARRAY_TYPES_STMT, schemasAndValuesForArrayTypes());
+        assertInsert(INSERT_ARRAY_TYPES_STMT, 1, schemasAndValuesForArrayTypes());
+    }
+
+    @Test
+    @FixFor("DBZ-1029")
+    public void shouldReceiveChangesForInsertsIndependentOfReplicaIdentity() {
+        // insert statement should not be affected by replica identity settings in any way
+
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        TestHelper.execute("ALTER TABLE test_table REPLICA IDENTITY DEFAULT;");
+        String statement = "INSERT INTO test_table (text) VALUES ('pk_and_default');";
+        assertInsert(statement, 2, Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "pk_and_default")));
+
+        consumer.expects(1);
+        TestHelper.execute("ALTER TABLE test_table REPLICA IDENTITY FULL;");
+        statement = "INSERT INTO test_table (text) VALUES ('pk_and_full');";
+        assertInsert(statement, 3, Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "pk_and_full")));
+
+        consumer.expects(1);
+        TestHelper.execute("ALTER TABLE test_table DROP CONSTRAINT test_table_pkey CASCADE;");
+        statement = "INSERT INTO test_table (pk, text) VALUES (4, 'no_pk_and_full');";
+        assertInsert(statement, 4, Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "no_pk_and_full")));
+
+        consumer.expects(1);
+        TestHelper.execute("ALTER TABLE test_table REPLICA IDENTITY DEFAULT;");
+        statement = "INSERT INTO test_table (pk, text) VALUES (5, 'no_pk_and_default');";
+        assertInsert(statement, 5, Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "no_pk_and_default")));
     }
 
     @Test
@@ -211,7 +339,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer = testConsumer(1);
         recordsProducer.start(consumer, blackHole);
 
-        assertInsert(INSERT_ARRAY_TYPES_WITH_NULL_VALUES_STMT, schemasAndValuesForArrayTypesWithNullValues());
+        assertInsert(INSERT_ARRAY_TYPES_WITH_NULL_VALUES_STMT, 1, schemasAndValuesForArrayTypesWithNullValues());
     }
 
     @Test
@@ -263,12 +391,30 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         VerifyRecord.isValidUpdate(updatedRecord, PK_FIELD, 1);
 
         // now we should get both old and new values
-        List<SchemaAndValueField> expectedBefore = Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA,
-                                                                                               "update"));
+        List<SchemaAndValueField> expectedBefore = Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "update"));
         assertRecordSchemaAndValues(expectedBefore, updatedRecord, Envelope.FieldName.BEFORE);
 
         expectedAfter = Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "update2"));
         assertRecordSchemaAndValues(expectedAfter, updatedRecord, Envelope.FieldName.AFTER);
+
+        // without PK and with REPLICA IDENTITY FULL we still getting all fields 'before' and all fields 'after'
+        TestHelper.execute("ALTER TABLE test_table DROP CONSTRAINT test_table_pkey CASCADE;");
+        consumer.expects(1);
+        executeAndWait("UPDATE test_table SET text = 'update3' WHERE pk = 1;");
+        updatedRecord = consumer.remove();
+        assertEquals(topicName, updatedRecord.topic());
+
+        expectedBefore = Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA,  "update2"));
+        assertRecordSchemaAndValues(expectedBefore, updatedRecord, Envelope.FieldName.BEFORE);
+
+        expectedAfter = Collections.singletonList(new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA,  "update3"));
+        assertRecordSchemaAndValues(expectedAfter, updatedRecord, Envelope.FieldName.AFTER);
+
+        // without PK and with REPLICA IDENTITY DEFAULT we will get nothing
+        TestHelper.execute("ALTER TABLE test_table REPLICA IDENTITY DEFAULT;");
+        consumer.expects(0);
+        executeAndWait("UPDATE test_table SET text = 'no_pk_and_default' WHERE pk = 1;");
+        assertThat(consumer.isEmpty()).isTrue();
     }
 
     @Test
@@ -342,9 +488,9 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         updatedRecord = consumer.remove();
         VerifyRecord.isValidUpdate(updatedRecord, PK_FIELD, 2);
         assertRecordSchemaAndValues(
-                Collections.singletonList(new SchemaAndValueField("modtype", SchemaBuilder.OPTIONAL_INT16_SCHEMA, (short)1)), updatedRecord, Envelope.FieldName.BEFORE);
+                Collections.singletonList(new SchemaAndValueField("modtype", SchemaBuilder.OPTIONAL_INT16_SCHEMA, (short) 1)), updatedRecord, Envelope.FieldName.BEFORE);
         assertRecordSchemaAndValues(
-                Collections.singletonList(new SchemaAndValueField("modtype", SchemaBuilder.OPTIONAL_INT16_SCHEMA, (short)2)), updatedRecord, Envelope.FieldName.AFTER);
+                Collections.singletonList(new SchemaAndValueField("modtype", SchemaBuilder.OPTIONAL_INT16_SCHEMA, (short) 2)), updatedRecord, Envelope.FieldName.AFTER);
     }
 
     @Test
@@ -412,7 +558,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         VerifyRecord.isValidInsert(insertRecord, PK_FIELD, 2);
         List<SchemaAndValueField> expectedSchemaAndValues = Arrays.asList(
                 new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "update"),
-                new SchemaAndValueField("default_column", SchemaBuilder.OPTIONAL_STRING_SCHEMA ,"default"));
+                new SchemaAndValueField("default_column", SchemaBuilder.OPTIONAL_STRING_SCHEMA , "default"));
         assertRecordSchemaAndValues(expectedSchemaAndValues, insertRecord, Envelope.FieldName.AFTER);
     }
 
@@ -499,7 +645,19 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         VerifyRecord.isValidInsert(updatedRecord, PK_FIELD, 6);
         assertRecordSchemaAndValues(
                 Collections.singletonList(new SchemaAndValueField("num_val", VariableScaleDecimal.builder().optional().build(), dvs2)), updatedRecord, Envelope.FieldName.AFTER);
-}
+
+        statements = "ALTER TABLE test_table ALTER COLUMN num_val SET NOT NULL;" +
+                "INSERT INTO test_table (pk,num_val) VALUES (7,1976);";
+
+        consumer.expects(1);
+        executeAndWait(statements);
+        updatedRecord = consumer.remove();
+
+        dvs2.put("scale", 0).put("value", new BigDecimal("1976").unscaledValue().toByteArray());
+        VerifyRecord.isValidInsert(updatedRecord, PK_FIELD, 7);
+        assertRecordSchemaAndValues(
+                Collections.singletonList(new SchemaAndValueField("num_val", VariableScaleDecimal.builder().build(), dvs2)), updatedRecord, Envelope.FieldName.AFTER);
+    }
 
     @Test
     public void shouldReceiveChangesForDeletes() throws Exception {
@@ -570,6 +728,48 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
     }
 
     @Test
+    public void shouldReceiveChangesForDeletesDependingOnReplicaIdentity() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                                                                               .with(PostgresConnectorConfig.INCLUDE_UNKNOWN_DATATYPES, true)
+                                                                               .with(CommonConnectorConfig.TOMBSTONES_ON_DELETE, false)
+                                                                               .build()
+        );
+        setupRecordsProducer(config);
+        String topicName = topicName("public.test_table");
+
+        // With PK we should get delete event with default level of replica identity
+        String statement = "ALTER TABLE test_table REPLICA IDENTITY DEFAULT;" +
+                            "DELETE FROM test_table WHERE pk = 1;";
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+        executeAndWait(statement);
+        SourceRecord record = consumer.remove();
+        assertEquals(topicName, record.topic());
+        VerifyRecord.isValidDelete(record, PK_FIELD, 1);
+
+        // Without PK we should get delete event with REPLICA IDENTITY FULL
+        statement = "ALTER TABLE test_table REPLICA IDENTITY FULL;" +
+                    "ALTER TABLE test_table DROP CONSTRAINT test_table_pkey CASCADE;" +
+                    "INSERT INTO test_table (pk, text) VALUES (2, 'insert2');" +
+                    "DELETE FROM test_table WHERE pk = 2;";
+        consumer.expects(2);
+        executeAndWait(statement);
+        assertRecordInserted("public.test_table", PK_FIELD, 2);
+        record = consumer.remove();
+        assertEquals(topicName, record.topic());
+        VerifyRecord.isValidDelete(record, PK_FIELD, 2);
+
+        // Without PK and without REPLICA IDENTITY FULL we will not get delete event
+        statement = "ALTER TABLE test_table REPLICA IDENTITY DEFAULT;" +
+                    "INSERT INTO test_table (pk, text) VALUES (3, 'insert3');" +
+                    "DELETE FROM test_table WHERE pk = 3;";
+        consumer.expects(1);
+        executeAndWait(statement);
+        assertRecordInserted("public.test_table", PK_FIELD, 3);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
     public void shouldReceiveNumericTypeAsDouble() throws Exception {
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
                 .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, PostgresConnectorConfig.DecimalHandlingMode.DOUBLE)
@@ -581,7 +781,7 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer = testConsumer(1);
         recordsProducer.start(consumer, blackHole);
 
-        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT, schemasAndValuesForDoubleEncodedNumericTypes());
+        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT, 1, schemasAndValuesForDoubleEncodedNumericTypes());
     }
 
     @Test
@@ -597,7 +797,119 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer = testConsumer(1);
         recordsProducer.start(consumer, blackHole);
 
-        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT, schemasAndValuesForStringEncodedNumericTypes());
+        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT, 1, schemasAndValuesForStringEncodedNumericTypes());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithSingleValueAsMap() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.MAP)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_STMT, 1, schemaAndValueFieldForMapEncodedHStoreType());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithMultipleValuesAsMap() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.MAP)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_WITH_MULTIPLE_VALUES_STMT, 1, schemaAndValueFieldForMapEncodedHStoreTypeWithMultipleValues());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithNullValuesAsMap() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.MAP)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_WITH_NULL_VALUES_STMT, 1, schemaAndValueFieldForMapEncodedHStoreTypeWithNullValues());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithSpecialCharactersInValuesAsMap() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.MAP)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_WITH_SPECIAL_CHAR_STMT, 1, schemaAndValueFieldForMapEncodedHStoreTypeWithSpecialCharacters());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeAsJsonString() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.JSON)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_STMT, 1, schemaAndValueFieldForJsonEncodedHStoreType());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithMultipleValuesAsJsonString() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.JSON)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_WITH_MULTIPLE_VALUES_STMT, 1, schemaAndValueFieldForJsonEncodedHStoreTypeWithMultipleValues());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithSpecialValuesInJsonString() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.JSON)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_WITH_SPECIAL_CHAR_STMT, 1, schemaAndValueFieldForJsonEncodedHStoreTypeWithSpcialCharacters());
+    }
+
+    @Test
+    @FixFor("DBZ-898")
+    public void shouldReceiveHStoreTypeWithNullValuesAsJsonString() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.HSTORE_HANDLING_MODE, PostgresConnectorConfig.HStoreHandlingMode.JSON)
+                .build());
+        setupRecordsProducer(config);
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_HSTORE_TYPE_WITH_NULL_VALUES_STMT, 1, schemaAndValueFieldForJsonEncodedHStoreTypeWithNullValues());
     }
 
     @Test
@@ -645,8 +957,6 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
     @Test
     @FixFor("DBZ-644")
-    @Ignore
-    // There are problems with test stability on Travis CI
     public void shouldPropagateSourceColumnTypeToSchemaParameter() throws Exception {
         PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
                 .with("column.propagate.source.type", ".*vc.*")
@@ -658,7 +968,24 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         consumer = testConsumer(1);
         recordsProducer.start(consumer, blackHole);
 
-        assertInsert(INSERT_STRING_TYPES_STMT, schemasAndValuesForStringTypesWithSourceColumnTypeInfo());
+        assertInsert(INSERT_STRING_TYPES_STMT, 1, schemasAndValuesForStringTypesWithSourceColumnTypeInfo());
+    }
+
+    @Test
+    @FixFor("DBZ-1073")
+    public void shouldPropagateSourceColumnTypeScaleToSchemaParameter() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+            .with("column.propagate.source.type", ".*(d|dzs)")
+            .with(PostgresConnectorConfig.DECIMAL_HANDLING_MODE, PostgresConnectorConfig.DecimalHandlingMode.DOUBLE)
+            .build());
+        setupRecordsProducer(config);
+
+        TestHelper.executeDDL("postgres_create_tables.ddl");
+
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        assertInsert(INSERT_NUMERIC_DECIMAL_TYPES_STMT, 1, schemasAndValuesForNumericTypesWithSourceColumnTypeInfo());
     }
 
     @Test
@@ -679,18 +1006,410 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
                            "INSERT INTO s1.b (bb) VALUES (22);";
 
         // expecting two heartbeat records and one actual change record
-        consumer = testConsumer(3);
+        consumer = testConsumer(DecoderDifferences.singleHeartbeatPerTransaction() ? 2 : 3);
         recordsProducer.start(consumer, blackHole);
         executeAndWait(statement);
 
-        // expecting no change record for s1.a but a heartbeat
-        assertHeartBeatRecordInserted();
+        if (!DecoderDifferences.singleHeartbeatPerTransaction()) {
+            // expecting no change record for s1.a but a heartbeat
+            assertHeartBeatRecordInserted();
+        }
 
         // and then a change record for s1.b and a heartbeat
         assertRecordInserted("s1.b", PK_FIELD, 1);
         assertHeartBeatRecordInserted();
 
         assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-911")
+    public void shouldNotRefreshSchemaOnUnchangedToastedData() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.SCHEMA_REFRESH_MODE, PostgresConnectorConfig.SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST)
+                .build());
+        setupRecordsProducer(config);
+
+        String toastedValue = RandomStringUtils.randomAlphanumeric(10000);
+
+        // inserting a toasted value should /always/ produce a correct record
+        String statement = "ALTER TABLE test_table ADD COLUMN not_toast integer; INSERT INTO test_table (not_toast, text) values (10, '" + toastedValue + "')";
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+        executeAndWait(statement);
+
+        SourceRecord record = consumer.remove();
+
+        // after record should contain the toasted value
+        List<SchemaAndValueField> expectedAfter = Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)
+        );
+        assertRecordSchemaAndValues(expectedAfter, record, Envelope.FieldName.AFTER);
+
+        // now we remove the toast column and update the not_toast column to see that our unchanged toast data
+        // does not trigger a table schema refresh. the after schema should look the same as before.
+        statement = "ALTER TABLE test_table DROP COLUMN text; update test_table set not_toast = 5 where not_toast = 10";
+
+        consumer.expects(1);
+        executeAndWait(statement);
+        Table tbl = recordsProducer.schema().tableFor(TableId.parse("public.test_table"));
+        assertEquals(Arrays.asList("pk", "text", "not_toast"), tbl.retrieveColumnNames());
+    }
+
+    @Test
+    @FixFor("DBZ-842")
+    public void shouldNotPropagateUnchangedToastedData() throws Exception {
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.SCHEMA_REFRESH_MODE, PostgresConnectorConfig.SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST)
+                .build());
+        setupRecordsProducer(config);
+
+        final String toastedValue1 = RandomStringUtils.randomAlphanumeric(10000);
+        final String toastedValue2 = RandomStringUtils.randomAlphanumeric(10000);
+        final String toastedValue3 = RandomStringUtils.randomAlphanumeric(10000);
+
+        // inserting a toasted value should /always/ produce a correct record
+        String statement =
+                "ALTER TABLE test_table ADD COLUMN not_toast integer;"
+              +  "ALTER TABLE test_table ADD COLUMN mandatory_text TEXT NOT NULL DEFAULT '" + toastedValue3 + "';"
+              + "INSERT INTO test_table (not_toast, text, mandatory_text) values (10, '" + toastedValue1 + "', '" + toastedValue1 + "');"
+              + "INSERT INTO test_table (not_toast, text, mandatory_text) values (10, '" + toastedValue2 + "', '" + toastedValue2 + "');";
+        consumer = testConsumer(2);
+        recordsProducer.start(consumer, blackHole);
+        executeAndWait(statement);
+
+        // after record should contain the toasted value
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue1),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, toastedValue1)
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue2),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, toastedValue2)
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+
+        statement =
+                "UPDATE test_table SET not_toast = 2;"
+              + "UPDATE test_table SET not_toast = 3;";
+
+        consumer.expects(6);
+        executeAndWait(statement);
+        consumer.process(record -> {
+            Table tbl = recordsProducer.schema().tableFor(TableId.parse("public.test_table"));
+            assertEquals(Arrays.asList("pk", "text", "not_toast", "mandatory_text"), tbl.retrieveColumnNames());
+        });
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 2),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "insert"),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, "")
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 2),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, "")
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 2),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, "")
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 3),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "insert"),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, "")
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 3),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, "")
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+        assertRecordSchemaAndValues(Arrays.asList(
+                new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 3),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null),
+                new SchemaAndValueField("mandatory_text", SchemaBuilder.STRING_SCHEMA, "")
+        ), consumer.remove(), Envelope.FieldName.AFTER);
+    }
+
+    @Test
+    @FixFor("DBZ-1029")
+    public void shouldReceiveChangesForTableWithoutPrimaryKey() throws Exception{
+        TestHelper.execute(
+                "DROP TABLE IF EXISTS test_table;",
+                "CREATE TABLE test_table (id SERIAL, text TEXT);",
+                "ALTER TABLE test_table REPLICA IDENTITY FULL"
+        );
+
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        // INSERT
+        String statement = "INSERT INTO test_table (text) VALUES ('a');";
+        assertInsert(
+                statement,
+                Arrays.asList(
+                        new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1), // SERIAL is NOT NULL implicitly
+                        new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "a")
+                )
+        );
+
+        // UPDATE
+        consumer.expects(1);
+        executeAndWait("UPDATE test_table set text='b' WHERE id=1");
+        SourceRecord updatedRecord = consumer.remove();
+        VerifyRecord.isValidUpdate(updatedRecord);
+
+        List<SchemaAndValueField> expectedBefore = Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "a")
+        );
+        assertRecordSchemaAndValues(expectedBefore, updatedRecord, Envelope.FieldName.BEFORE);
+
+        List<SchemaAndValueField> expectedAfter = Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "b")
+        );
+        assertRecordSchemaAndValues(expectedAfter, updatedRecord, Envelope.FieldName.AFTER);
+
+        // DELETE
+        consumer.expects(2);
+        executeAndWait("DELETE FROM test_table WHERE id=1");
+        SourceRecord deletedRecord = consumer.remove();
+        VerifyRecord.isValidDelete(deletedRecord);
+
+        expectedBefore = Arrays.asList(
+                new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, "b")
+        );
+        assertRecordSchemaAndValues(expectedBefore, deletedRecord, Envelope.FieldName.BEFORE);
+
+        expectedAfter = null;
+        assertRecordSchemaAndValues(expectedAfter, deletedRecord, Envelope.FieldName.AFTER);
+    }
+
+    @Test()
+    @FixFor("DBZ-1130")
+    @SkipWhenDecoderPluginNameIsNot(WAL2JSON)
+    public void testPassingStreamParams() throws Exception {
+        // Verify that passing stream parameters works by using the WAL2JSON add-tables parameter which acts as a
+        // whitelist.
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.STREAM_PARAMS, "add-tables=s1.should_stream")
+                .build());
+        setupRecordsProducer(config);
+        String statement = "CREATE SCHEMA s1;" +
+                "CREATE TABLE s1.should_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                "CREATE TABLE s1.should_not_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                "INSERT INTO s1.should_not_stream (aa) VALUES (456);" +
+                "INSERT INTO s1.should_stream (aa) VALUES (123);";
+
+
+        // Verify only one record made it
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+        executeAndWait(statement);
+
+        // Verify the record that made it was from the whitelisted table
+        assertRecordInserted("s1.should_stream", PK_FIELD, 1);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test()
+    @FixFor("DBZ-1130")
+    @SkipWhenDecoderPluginNameIsNot(WAL2JSON)
+    public void testPassingStreamMultipleParams() throws Exception {
+        // Verify that passing multiple stream parameters and multiple parameter values works.
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.STREAM_PARAMS, "add-tables=s1.should_stream,s2.*;filter-tables=s2.should_not_stream")
+                .build());
+        setupRecordsProducer(config);
+        String statement = "CREATE SCHEMA s1;" + "CREATE SCHEMA s2;" +
+                "CREATE TABLE s1.should_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                "CREATE TABLE s2.should_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                "CREATE TABLE s1.should_not_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                "CREATE TABLE s2.should_not_stream (pk SERIAL, aa integer, PRIMARY KEY(pk));" +
+                "INSERT INTO s1.should_not_stream (aa) VALUES (456);" +
+                "INSERT INTO s2.should_not_stream (aa) VALUES (111);" +
+                "INSERT INTO s1.should_stream (aa) VALUES (123);" +
+                "INSERT INTO s2.should_stream (aa) VALUES (999);";
+
+
+        // Verify only the whitelisted record from s1 and s2 made it.
+        consumer = testConsumer(2);
+        recordsProducer.start(consumer, blackHole);
+        executeAndWait(statement);
+
+        // Verify the record that made it was from the whitelisted table
+        assertRecordInserted("s1.should_stream", PK_FIELD, 1);
+        assertRecordInserted("s2.should_stream", PK_FIELD, 1);
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-1146")
+    public void shouldReceiveChangesForReplicaIdentityFullTableWithToastedValueTableFromSnapshot() throws Exception {
+        testReceiveChangesForReplicaIdentityFullTableWithToastedValue(SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST, true);
+    }
+
+    @Test
+    @FixFor("DBZ-1146")
+    public void shouldReceiveChangesForReplicaIdentityFullTableWithToastedValueTableFromStreaming() throws Exception {
+        testReceiveChangesForReplicaIdentityFullTableWithToastedValue(SchemaRefreshMode.COLUMNS_DIFF_EXCLUDE_UNCHANGED_TOAST, false);
+    }
+
+    @Test
+    @FixFor("DBZ-1146")
+    public void shouldReceiveChangesForReplicaIdentityFullTableWithToastedValueTableFromSnapshotFullDiff() throws Exception {
+        testReceiveChangesForReplicaIdentityFullTableWithToastedValue(SchemaRefreshMode.COLUMNS_DIFF, true);
+    }
+
+    @Test
+    @FixFor("DBZ-1146")
+    public void shouldReceiveChangesForReplicaIdentityFullTableWithToastedValueTableFromStreamingFullDiff() throws Exception {
+        testReceiveChangesForReplicaIdentityFullTableWithToastedValue(SchemaRefreshMode.COLUMNS_DIFF, false);
+    }
+
+    @Test()
+    @FixFor("DBZ-1181")
+    @SkipWhenDecoderPluginNameIs(DECODERBUFS)
+    public void testEmptyChangesProducesHeartbeat() throws Exception {
+        // the low heartbeat interval should make sure that a heartbeat message is emitted after each change record
+        // received from Postgres
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(Heartbeat.HEARTBEAT_INTERVAL, "1")
+                .build());
+        setupRecordsProducer(config);
+        String statement = "CREATE SCHEMA s1;" ;
+
+        // Expecting one empty DDL change
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+        executeAndWait(statement);
+
+        // Expecting one heartbeat for the empty DDL change
+        assertHeartBeatRecordInserted();
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-1082")
+    public void shouldHaveNoXminWhenNotEnabled() throws Exception {
+        // Verify that passing multiple stream parameters and multiple parameter values works.
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.XMIN_FETCH_INTERVAL, "0")
+                .build());
+        setupRecordsProducer(config);
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        TestHelper.execute("ALTER TABLE test_table REPLICA IDENTITY DEFAULT;");
+        String statement = "INSERT INTO test_table (text) VALUES ('no_xmin');";
+        executeAndWait(statement);
+
+        // Verify the record that made it does not have an xmin
+        SourceRecord rec = assertRecordInserted("public.test_table", PK_FIELD, 2);
+        assertSourceInfo(rec, "postgres", "public", "test_table");
+
+        Struct source = ((Struct) rec.value()).getStruct("source");
+        assertThat(source.getInt64("xmin")).isNull();
+
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    @Test
+    @FixFor("DBZ-1082")
+    public void shouldHaveXminWhenEnabled() throws Exception {
+        // Verify that passing multiple stream parameters and multiple parameter values works.
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.XMIN_FETCH_INTERVAL, "10")
+                .build());
+        setupRecordsProducer(config);
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        TestHelper.execute("ALTER TABLE test_table REPLICA IDENTITY DEFAULT;");
+        String statement = "INSERT INTO test_table (text) VALUES ('with_xmin');";
+        executeAndWait(statement);
+
+        // Verify the record that made it does not have an xmin
+        SourceRecord rec = assertRecordInserted("public.test_table", PK_FIELD, 2);
+        assertSourceInfo(rec, "postgres", "public", "test_table");
+
+        Struct source = ((Struct) rec.value()).getStruct("source");
+        assertThat(source.getInt64("xmin")).isGreaterThan(0L);
+
+        assertThat(consumer.isEmpty()).isTrue();
+    }
+
+    private void testReceiveChangesForReplicaIdentityFullTableWithToastedValue(PostgresConnectorConfig.SchemaRefreshMode mode, boolean tablesBeforeStart) throws Exception{
+        PostgresConnectorConfig config = new PostgresConnectorConfig(TestHelper.defaultConfig()
+                .with(PostgresConnectorConfig.SCHEMA_REFRESH_MODE, mode)
+                .build());
+        setupRecordsProducer(config);
+
+        if (tablesBeforeStart) {
+            TestHelper.execute(
+                    "DROP TABLE IF EXISTS test_table;",
+                    "CREATE TABLE test_table (id SERIAL, not_toast int, text TEXT);",
+                    "ALTER TABLE test_table REPLICA IDENTITY FULL"
+            );
+        }
+
+        consumer = testConsumer(1);
+        recordsProducer.start(consumer, blackHole);
+
+        final String toastedValue = RandomStringUtils.randomAlphanumeric(10000);
+
+        if (!tablesBeforeStart) {
+            TestHelper.execute(
+                    "DROP TABLE IF EXISTS test_table;",
+                    "CREATE TABLE test_table (id SERIAL, not_toast int, text TEXT);",
+                    "ALTER TABLE test_table REPLICA IDENTITY FULL"
+            );
+        }
+
+        // INSERT
+        String statement = "INSERT INTO test_table (not_toast, text) VALUES (10,'" + toastedValue + "');";
+        assertInsert(
+                statement,
+                Arrays.asList(
+                        new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1), // SERIAL is NOT NULL implicitly
+                        new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                        new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)
+                )
+        );
+
+        // UPDATE
+        consumer.expects(1);
+        executeAndWait("UPDATE test_table set not_toast = 20");
+        SourceRecord updatedRecord = consumer.remove();
+
+        if (DecoderDifferences.areToastedValuesPresentInSchema()) {
+            assertRecordSchemaAndValues(Arrays.asList(
+                    new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10),
+                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, toastedValue)
+            ), updatedRecord, Envelope.FieldName.BEFORE);
+            assertRecordSchemaAndValues(Arrays.asList(
+                    new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20),
+                    new SchemaAndValueField("text", SchemaBuilder.OPTIONAL_STRING_SCHEMA, null)
+            ), updatedRecord, Envelope.FieldName.AFTER);
+        }
+        else {
+            assertRecordSchemaAndValues(Arrays.asList(
+                    new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 10)
+            ), updatedRecord, Envelope.FieldName.BEFORE);
+            assertRecordSchemaAndValues(Arrays.asList(
+                    new SchemaAndValueField("id", SchemaBuilder.INT32_SCHEMA, 1),
+                    new SchemaAndValueField("not_toast", SchemaBuilder.OPTIONAL_INT32_SCHEMA, 20)
+            ), updatedRecord, Envelope.FieldName.AFTER);
+        }
+
+        recordsProducer.stop();
     }
 
     private void assertHeartBeatRecordInserted() {
@@ -712,25 +1431,25 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
 
         PostgresTaskContext context = new PostgresTaskContext(
                 config,
-                new PostgresSchema(config, TestHelper.getTypeRegistry(), selector),
+                TestHelper.getSchema(config),
                 selector
         );
         recordsProducer = new RecordsStreamProducer(context, new SourceInfo(config.getLogicalName(), config.databaseName()));
     }
 
     private void assertInsert(String statement, List<SchemaAndValueField> expectedSchemaAndValuesByColumn) {
-        assertInsert(statement, 1, expectedSchemaAndValuesByColumn);
+        assertInsert(statement, null, expectedSchemaAndValuesByColumn);
     }
 
-    private void assertInsert(String statement, int pk, List<SchemaAndValueField> expectedSchemaAndValuesByColumn) {
+    private void assertInsert(String statement, Integer pk, List<SchemaAndValueField> expectedSchemaAndValuesByColumn) {
         TableId table = tableIdFromInsertStmt(statement);
         String expectedTopicName = table.schema() + "." + table.table();
         expectedTopicName = expectedTopicName.replaceAll("[ \"]", "_");
 
         try {
             executeAndWait(statement);
-            SourceRecord record = assertRecordInserted(expectedTopicName, PK_FIELD, pk);
-            assertRecordOffset(record, false, false);
+            SourceRecord record = assertRecordInserted(expectedTopicName, pk != null ? PK_FIELD : null, pk);
+            assertRecordOffsetAndSnapshotSource(record, false, false);
             assertSourceInfo(record, "postgres", table.schema(), table.table());
             assertRecordSchemaAndValues(expectedSchemaAndValuesByColumn, record, Envelope.FieldName.AFTER);
         }
@@ -739,11 +1458,18 @@ public class RecordsStreamProducerIT extends AbstractRecordsProducerTest {
         }
     }
 
-    private SourceRecord assertRecordInserted(String expectedTopicName, String pkColumn, int pk) throws InterruptedException {
+    private SourceRecord assertRecordInserted(String expectedTopicName, String pkColumn, Integer pk) throws InterruptedException {
         assertFalse("records not generated", consumer.isEmpty());
         SourceRecord insertedRecord = consumer.remove();
         assertEquals(topicName(expectedTopicName), insertedRecord.topic());
-        VerifyRecord.isValidInsert(insertedRecord, pkColumn, pk);
+
+        if (pk != null) {
+            VerifyRecord.isValidInsert(insertedRecord, pkColumn, pk);
+        }
+        else {
+            VerifyRecord.isValidInsert(insertedRecord);
+        }
+
         return insertedRecord;
     }
 

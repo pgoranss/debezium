@@ -5,130 +5,41 @@
  */
 package io.debezium.connector.mysql;
 
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
-import io.debezium.util.Clock;
+import io.debezium.connector.base.ChangeEventQueueMetrics;
+import io.debezium.pipeline.metrics.SnapshotChangeEventSourceMetrics;
 
 /**
  * @author Randall Hauch
  *
  */
-class SnapshotReaderMetrics extends Metrics implements SnapshotReaderMetricsMXBean {
+class SnapshotReaderMetrics extends SnapshotChangeEventSourceMetrics implements SnapshotReaderMetricsMXBean {
 
-    private final AtomicLong tableCount = new AtomicLong();
-    private final AtomicLong remainingTableCount = new AtomicLong();
     private final AtomicBoolean holdingGlobalLock = new AtomicBoolean();
-    private final AtomicBoolean snapshotRunning = new AtomicBoolean();
-    private final AtomicBoolean snapshotCompleted = new AtomicBoolean();
-    private final AtomicBoolean snapshotAborted = new AtomicBoolean();
-    private final AtomicLong startTime = new AtomicLong();
-    private final AtomicLong stopTime = new AtomicLong();
-    private final ConcurrentMap<String, Long> rowsScanned = new ConcurrentHashMap<String, Long>();
 
     private final MySqlSchema schema;
 
-    private final Clock clock;
-    
-    public SnapshotReaderMetrics(Clock clock, MySqlSchema schema) {
-        super("snapshot");
-        this.clock = clock;
+    public SnapshotReaderMetrics(MySqlTaskContext taskContext, MySqlSchema schema, ChangeEventQueueMetrics changeEventQueueMetrics) {
+        super(taskContext, changeEventQueueMetrics, null);
         this.schema = schema;
     }
-    
-    @Override
-    public int getTotalTableCount() {
-        return this.tableCount.intValue();
-    }
 
-    @Override
-    public int getRemainingTableCount() {
-        return this.remainingTableCount.intValue();
-    }
-    
-    @Override
-    public boolean getSnapshotRunning() {
-        return this.snapshotRunning.get();
-    }
-    
-    @Override
-    public boolean getSnapshotCompleted() {
-        return this.snapshotCompleted.get();
-    }
-    
-    @Override
-    public boolean getSnapshotAborted() {
-        return this.snapshotAborted.get();
-    }
-    
     @Override
     public boolean getHoldingGlobalLock() {
         return holdingGlobalLock.get();
     }
-    
-    @Override
-    public long getSnapshotDurationInSeconds() {
-        long startMillis = startTime.get();
-        if ( startMillis <= 0L) {
-            return 0;
-        }
-        long stopMillis = stopTime.get();
-        if ( stopMillis == 0L ) stopMillis = clock.currentTimeInMillis();
-        return (stopMillis - startMillis)/1000L;
-    }
-    
+
     public void globalLockAcquired() {
         holdingGlobalLock.set(true);
     }
-    
+
     public void globalLockReleased() {
         holdingGlobalLock.set(false);
-    }
-    
-    public void setTableCount(int tableCount) {
-        this.tableCount.set(tableCount);
-        this.remainingTableCount.set(tableCount);
-    }
-    
-    public void completeTable() {
-        remainingTableCount.decrementAndGet();
-    }
-    
-    public void startSnapshot() {
-        this.snapshotRunning.set(true);
-        this.snapshotCompleted.set(false);
-        this.snapshotAborted.set(false);
-        this.startTime.set(clock.currentTimeInMillis());
-        this.stopTime.set(0L);
-    }
-    
-    public void completeSnapshot() {
-        this.snapshotCompleted.set(true);
-        this.snapshotAborted.set(false);
-        this.snapshotRunning.set(false);
-        this.stopTime.set(clock.currentTimeInMillis());
-    }
-    
-    public void abortSnapshot() {
-        this.snapshotCompleted.set(false);
-        this.snapshotAborted.set(true);
-        this.snapshotRunning.set(false);
-        this.stopTime.set(clock.currentTimeInMillis());
     }
 
     @Override
     public String[] getMonitoredTables() {
         return schema.monitoredTablesAsStringArray();
-    }
-    
-    public void setRowsScanned(String tableId, Long numRows) {
-        rowsScanned.put(tableId, numRows);
-    }
-
-    @Override
-    public ConcurrentMap<String, Long> getRowsScanned() {
-        return rowsScanned;
     }
 }

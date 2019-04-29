@@ -18,7 +18,6 @@ import org.slf4j.LoggerFactory;
 import io.debezium.annotation.NotThreadSafe;
 import io.debezium.config.Configuration;
 import io.debezium.connector.mysql.MySqlConnectorConfig.BigIntUnsignedHandlingMode;
-import io.debezium.connector.mysql.MySqlConnectorConfig.DecimalHandlingMode;
 import io.debezium.connector.mysql.MySqlSystemVariables.MySqlScope;
 import io.debezium.document.Document;
 import io.debezium.jdbc.JdbcValueConverters.BigIntUnsignedMode;
@@ -83,21 +82,25 @@ public class MySqlSchema extends RelationalDatabaseSchema {
      *          may be null if not needed
      * @param tableIdCaseInsensitive true if table lookup ignores letter case
      */
-    public MySqlSchema(MySqlConnectorConfig configuration, Predicate<String> gtidFilter, boolean tableIdCaseInsensitive, TopicSelector<TableId> topicSelector) {
+    public MySqlSchema(MySqlConnectorConfig configuration,
+                       Predicate<String> gtidFilter,
+                       boolean tableIdCaseInsensitive,
+                       TopicSelector<TableId> topicSelector,
+                       Filters tableFilters) {
         super(
                 configuration,
                 topicSelector,
-                TableFilter.fromPredicate(new Filters(configuration.getConfig()).tableFilter()),
-                new Filters(configuration.getConfig()).columnFilter(),
+                TableFilter.fromPredicate(tableFilters.tableFilter()),
+                tableFilters.columnFilter(),
                 new TableSchemaBuilder(
-                        getValueConverters(configuration.getConfig()), SchemaNameAdjuster.create(logger), SourceInfo.SCHEMA)
+                        getValueConverters(configuration), SchemaNameAdjuster.create(logger), SourceInfo.SCHEMA)
                 ,
                 tableIdCaseInsensitive
         );
 
         Configuration config = configuration.getConfig();
 
-        this.filters = new Filters(config);
+        this.filters = tableFilters;
 
         // Do not remove the prefix from the subset of config properties ...
         String connectorName = config.getString("name", configuration.getLogicalName());
@@ -109,8 +112,8 @@ public class MySqlSchema extends RelationalDatabaseSchema {
         this.storeOnlyMonitoredTablesDdl = dbHistoryConfig.getBoolean(DatabaseHistory.STORE_ONLY_MONITORED_TABLES_DDL);
 
         this.ddlParser = configuration.getDdlParsingMode().getNewParserInstance(
-                getValueConverters(config),
-                storeOnlyMonitoredTablesDdl ? getTableFilter() : TableFilter.includeAll()
+                getValueConverters(configuration),
+                getTableFilter()
         );
         this.ddlChanges = this.ddlParser.getDdlChanges();
 
@@ -132,21 +135,20 @@ public class MySqlSchema extends RelationalDatabaseSchema {
 
     }
 
-    private static MySqlValueConverters getValueConverters(Configuration config) {
+    private static MySqlValueConverters getValueConverters(MySqlConnectorConfig configuration) {
         // Use MySQL-specific converters and schemas for values ...
 
-        String timePrecisionModeStr = config.getString(MySqlConnectorConfig.TIME_PRECISION_MODE);
+        String timePrecisionModeStr = configuration.getConfig().getString(MySqlConnectorConfig.TIME_PRECISION_MODE);
         TemporalPrecisionMode timePrecisionMode = TemporalPrecisionMode.parse(timePrecisionModeStr);
 
-        String decimalHandlingModeStr = config.getString(MySqlConnectorConfig.DECIMAL_HANDLING_MODE);
-        DecimalHandlingMode decimalHandlingMode = DecimalHandlingMode.parse(decimalHandlingModeStr);
-        DecimalMode decimalMode = decimalHandlingMode.asDecimalMode();
+        DecimalMode decimalMode = configuration.getDecimalMode();
 
-        String bigIntUnsignedHandlingModeStr = config.getString(MySqlConnectorConfig.BIGINT_UNSIGNED_HANDLING_MODE);
+        String bigIntUnsignedHandlingModeStr = configuration.getConfig().getString(MySqlConnectorConfig.BIGINT_UNSIGNED_HANDLING_MODE);
         BigIntUnsignedHandlingMode bigIntUnsignedHandlingMode = BigIntUnsignedHandlingMode.parse(bigIntUnsignedHandlingModeStr);
         BigIntUnsignedMode bigIntUnsignedMode = bigIntUnsignedHandlingMode.asBigIntUnsignedMode();
 
-        return new MySqlValueConverters(decimalMode, timePrecisionMode, bigIntUnsignedMode);
+        final boolean timeAdjusterEnabled = configuration.getConfig().getBoolean(MySqlConnectorConfig.ENABLE_TIME_ADJUSTER);
+        return new MySqlValueConverters(decimalMode, timePrecisionMode, bigIntUnsignedMode, timeAdjusterEnabled ? MySqlValueConverters::adjustTemporal : x -> x);
     }
 
     protected HistoryRecordComparator historyComparator() {
@@ -296,14 +298,16 @@ public class MySqlSchema extends RelationalDatabaseSchema {
     public boolean applyDdl(SourceInfo source, String databaseName, String ddlStatements,
                             DatabaseStatementStringConsumer statementConsumer) {
         Set<TableId> changes;
-        if (ignoredQueryStatements.contains(ddlStatements)) return false;
+        if (ignoredQueryStatements.contains(ddlStatements)) {
+            return false;
+        }
         try {
             this.ddlChanges.reset();
             this.ddlParser.setCurrentSchema(databaseName);
             this.ddlParser.parse(ddlStatements, tables());
         } catch (ParsingException | MultipleParsingExceptions e) {
             if (skipUnparseableDDL) {
-                logger.warn("Ignoring unparseable DDL statement '{}': {}", ddlStatements);
+                logger.warn("Ignoring unparseable DDL statement '{}': {}", ddlStatements, e);
             } else {
                 throw e;
             }
@@ -330,12 +334,16 @@ public class MySqlSchema extends RelationalDatabaseSchema {
                         // to the same _affected_ database...
                         ddlChanges.groupStatementStringsByDatabase((dbName, ddl) -> {
                             if (filters.databaseFilter().test(dbName) || dbName == null || "".equals(dbName)) {
-                                if (dbName == null) dbName = "";
+                                if (dbName == null) {
+                                    dbName = "";
+                                }
                                 statementConsumer.consume(dbName, ddlStatements);
                             }
                         });
                     } else if (filters.databaseFilter().test(databaseName) || databaseName == null || "".equals(databaseName)) {
-                        if (databaseName == null) databaseName = "";
+                        if (databaseName == null) {
+                            databaseName = "";
+                        }
                         statementConsumer.consume(databaseName, ddlStatements);
                     }
                 }

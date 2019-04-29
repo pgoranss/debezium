@@ -55,7 +55,8 @@ public abstract class AbstractMysqlDefaultValueTest {
                 "    C TINYINT UNSIGNED NULL," +
                 "    D TINYINT UNSIGNED NOT NULL," +
                 "    E TINYINT UNSIGNED NOT NULL DEFAULT 0," +
-                "    F TINYINT UNSIGNED NOT NULL DEFAULT '0'" +
+                "    F TINYINT UNSIGNED NOT NULL DEFAULT '0'," +
+                "    G TINYINT UNSIGNED NOT NULL DEFAULT '255'" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "UNSIGNED_TINYINT_TABLE"));
@@ -69,6 +70,7 @@ public abstract class AbstractMysqlDefaultValueTest {
         assertThat(table.columnWithName("E").isOptional()).isEqualTo(false);
         assertThat(table.columnWithName("E").defaultValue()).isEqualTo((short) 0);
         assertThat(table.columnWithName("F").defaultValue()).isEqualTo((short) 0);
+        assertThat(table.columnWithName("G").defaultValue()).isEqualTo((short) 255);
     }
 
     @Test
@@ -79,7 +81,8 @@ public abstract class AbstractMysqlDefaultValueTest {
                 "  C SMALLINT UNSIGNED NULL,\n" +
                 "  D SMALLINT UNSIGNED NOT NULL,\n" +
                 "  E SMALLINT UNSIGNED NOT NULL DEFAULT 0,\n" +
-                "  F SMALLINT UNSIGNED NOT NULL DEFAULT '0'\n" +
+                "  F SMALLINT UNSIGNED NOT NULL DEFAULT '0',\n" +
+                "  G SMALLINT UNSIGNED NOT NULL DEFAULT '65535'\n" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "UNSIGNED_SMALLINT_TABLE"));
@@ -92,6 +95,7 @@ public abstract class AbstractMysqlDefaultValueTest {
         assertThat(table.columnWithName("E").isOptional()).isEqualTo(false);
         assertThat(table.columnWithName("E").defaultValue()).isEqualTo(0);
         assertThat(table.columnWithName("F").defaultValue()).isEqualTo(0);
+        assertThat(table.columnWithName("G").defaultValue()).isEqualTo(65535);
     }
 
     @Test
@@ -102,7 +106,8 @@ public abstract class AbstractMysqlDefaultValueTest {
                 "  C MEDIUMINT UNSIGNED NULL,\n" +
                 "  D MEDIUMINT UNSIGNED NOT NULL,\n" +
                 "  E MEDIUMINT UNSIGNED NOT NULL DEFAULT 0,\n" +
-                "  F MEDIUMINT UNSIGNED NOT NULL DEFAULT '0'\n" +
+                "  F MEDIUMINT UNSIGNED NOT NULL DEFAULT '0',\n" +
+                "  G MEDIUMINT UNSIGNED NOT NULL DEFAULT '16777215'\n" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "UNSIGNED_MEDIUMINT_TABLE"));
@@ -115,6 +120,7 @@ public abstract class AbstractMysqlDefaultValueTest {
         assertThat(table.columnWithName("E").isOptional()).isEqualTo(false);
         assertThat(table.columnWithName("E").defaultValue()).isEqualTo(0);
         assertThat(table.columnWithName("F").defaultValue()).isEqualTo(0);
+        assertThat(table.columnWithName("G").defaultValue()).isEqualTo(16777215);
     }
 
     @Test
@@ -125,7 +131,8 @@ public abstract class AbstractMysqlDefaultValueTest {
                 "  C INT UNSIGNED NULL,\n" +
                 "  D INT UNSIGNED NOT NULL,\n" +
                 "  E INT UNSIGNED NOT NULL DEFAULT 0,\n" +
-                "  F INT UNSIGNED NOT NULL DEFAULT '0'\n" +
+                "  F INT UNSIGNED NOT NULL DEFAULT '0',\n" +
+                "  G INT UNSIGNED NOT NULL DEFAULT '4294967295'\n" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "UNSIGNED_INT_TABLE"));
@@ -138,6 +145,7 @@ public abstract class AbstractMysqlDefaultValueTest {
         assertThat(table.columnWithName("E").isOptional()).isEqualTo(false);
         assertThat(table.columnWithName("E").defaultValue()).isEqualTo(0L);
         assertThat(table.columnWithName("F").defaultValue()).isEqualTo(0L);
+        assertThat(table.columnWithName("G").defaultValue()).isEqualTo(4294967295L);
     }
 
     @Test
@@ -175,7 +183,8 @@ public abstract class AbstractMysqlDefaultValueTest {
                 "  C BIGINT UNSIGNED NULL,\n" +
                 "  D BIGINT UNSIGNED NOT NULL,\n" +
                 "  E BIGINT UNSIGNED NOT NULL DEFAULT 0,\n" +
-                "  F BIGINT UNSIGNED NOT NULL DEFAULT '0'\n" +
+                "  F BIGINT UNSIGNED NOT NULL DEFAULT '0',\n" +
+                "  G BIGINT UNSIGNED NOT NULL DEFAULT '18446744073709551615'\n" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "UNSIGNED_BIGINT_TABLE"));
@@ -188,6 +197,7 @@ public abstract class AbstractMysqlDefaultValueTest {
         assertThat(table.columnWithName("E").isOptional()).isEqualTo(false);
         assertThat(table.columnWithName("E").defaultValue()).isEqualTo(BigDecimal.ZERO);
         assertThat(table.columnWithName("F").defaultValue()).isEqualTo(BigDecimal.ZERO);
+        assertThat(table.columnWithName("G").defaultValue()).isEqualTo(new BigDecimal("18446744073709551615"));
     }
 
     @Test
@@ -297,14 +307,16 @@ public abstract class AbstractMysqlDefaultValueTest {
     public void parseNumericAndDecimalToDoubleDefaultValue() {
         String sql = "CREATE TABLE NUMERIC_DECIMAL_TABLE (\n" +
                 "  A NUMERIC NOT NULL DEFAULT 1.23,\n" +
-                "  B DECIMAL NOT NULL DEFAULT 2.321,\n" +
-                "  C NUMERIC NULL DEFAULT '12.678'\n" +
+                "  B DECIMAL(5,3) NOT NULL DEFAULT 2.321,\n" +
+                "  C NUMERIC NULL DEFAULT '12.678',\n" +
+                "  D DECIMAL(5,2) NULL DEFAULT '12.678'\n" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "NUMERIC_DECIMAL_TABLE"));
-        assertThat(table.columnWithName("A").defaultValue()).isEqualTo(1.23d);
+        assertThat(table.columnWithName("A").defaultValue()).isEqualTo(1.0d);
         assertThat(table.columnWithName("B").defaultValue()).isEqualTo(2.321d);
-        assertThat(table.columnWithName("C").defaultValue()).isEqualTo(12.678d);
+        assertThat(table.columnWithName("C").defaultValue()).isEqualTo(13d);
+        assertThat(table.columnWithName("D").defaultValue()).isEqualTo(12.68d);
     }
 
     @Test
@@ -315,14 +327,14 @@ public abstract class AbstractMysqlDefaultValueTest {
         final AbstractDdlParser parser = parserProducer.apply(converters);
         String sql = "CREATE TABLE NUMERIC_DECIMAL_TABLE (\n" +
                 "  A NUMERIC NOT NULL DEFAULT 1.23,\n" +
-                "  B DECIMAL NOT NULL DEFAULT 2.321,\n" +
+                "  B DECIMAL(5,3) NOT NULL DEFAULT 2.321,\n" +
                 "  C NUMERIC NULL DEFAULT '12.678'\n" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "NUMERIC_DECIMAL_TABLE"));
-        assertThat(table.columnWithName("A").defaultValue()).isEqualTo(BigDecimal.valueOf(1.23));
+        assertThat(table.columnWithName("A").defaultValue()).isEqualTo(BigDecimal.valueOf(1));
         assertThat(table.columnWithName("B").defaultValue()).isEqualTo(BigDecimal.valueOf(2.321));
-        assertThat(table.columnWithName("C").defaultValue()).isEqualTo(BigDecimal.valueOf(12.678));
+        assertThat(table.columnWithName("C").defaultValue()).isEqualTo(BigDecimal.valueOf(13));
     }
 
     @Test
@@ -339,7 +351,10 @@ public abstract class AbstractMysqlDefaultValueTest {
                 "  I datetime(3) NOT NULL DEFAULT '0000-00-00 00:00:00.000'," +
                 "  J datetime NOT NULL DEFAULT '2018-06-26 12:34:56'," +
                 "  K datetime(3) NOT NULL DEFAULT '2018-06-26 12:34:56.000'," +
-                "  L datetime(2) NOT NULL DEFAULT '2018-06-26 12:34:56.78'" +
+                "  L datetime(2) NOT NULL DEFAULT '2018-06-26 12:34:56.78'," +
+                "  M datetime NOT NULL DEFAULT '2000-01-00 00:00:00'," +
+                "  N datetime NOT NULL DEFAULT '0000-12-01 00:00:00'," +
+                "  O datetime NOT NULL DEFAULT '2000-00-01 00:00:00'" +
                 ");";
         parser.parse(sql, tables);
         Table table = tables.forTable(new TableId(null, null, "TIME_TABLE"));
@@ -355,6 +370,33 @@ public abstract class AbstractMysqlDefaultValueTest {
         assertThat(table.columnWithName("J").defaultValue()).isEqualTo(Date.from(ZonedDateTime.of(2018, 6, 26, 12, 34, 56, 0, ZoneOffset.UTC).toInstant()));
         assertThat(table.columnWithName("K").defaultValue()).isEqualTo(Date.from(ZonedDateTime.of(2018, 6, 26, 12, 34, 56, 0, ZoneOffset.UTC).toInstant()));
         assertThat(table.columnWithName("L").defaultValue()).isEqualTo(Date.from(ZonedDateTime.of(2018, 6, 26, 12, 34, 56, 780_000_000, ZoneOffset.UTC).toInstant()));
+        assertThat(table.columnWithName("M").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+        assertThat(table.columnWithName("N").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+        assertThat(table.columnWithName("O").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+    }
+
+    @Test
+    public void parseDateDefaultValue() {
+        String sql = "CREATE TABLE DATE_TABLE (" +
+                "  A date NOT NULL DEFAULT '0000-00-00'," +
+                "  B date NOT NULL DEFAULT '2018-00-01'," +
+                "  C date NOT NULL DEFAULT '0000-12-31'," +
+                "  D date NOT NULL DEFAULT '2018-01-00'," +
+                "  E date NOT NULL DEFAULT '9999-09-09'," +
+                "  F date NOT NULL DEFAULT '1111-11-11'," +
+                "  G date NOT NULL DEFAULT '2018-08-31'," +
+                "  H date NOT NULL DEFAULT 0" +
+                ");";
+        parser.parse(sql, tables);
+        Table table = tables.forTable(new TableId(null, null, "DATE_TABLE"));
+        assertThat(table.columnWithName("A").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+        assertThat(table.columnWithName("B").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+        assertThat(table.columnWithName("C").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+        assertThat(table.columnWithName("D").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
+        assertThat(table.columnWithName("E").defaultValue()).isEqualTo(Date.from(ZonedDateTime.of(9999, 9, 9, 0, 0, 0, 0, ZoneOffset.UTC).toInstant()));
+        assertThat(table.columnWithName("F").defaultValue()).isEqualTo(Date.from(ZonedDateTime.of(1111, 11, 11, 0, 0, 0, 0, ZoneOffset.UTC).toInstant()));
+        assertThat(table.columnWithName("G").defaultValue()).isEqualTo(Date.from(ZonedDateTime.of(2018, 8, 31, 0, 0, 0, 0, ZoneOffset.UTC).toInstant()));
+        assertThat(table.columnWithName("H").defaultValue()).isEqualTo((Date.from(Instant.ofEpochMilli(0))));
     }
 
     @Test

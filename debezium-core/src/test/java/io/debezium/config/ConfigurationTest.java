@@ -50,7 +50,7 @@ public class ConfigurationTest {
     }
 
     @Test
-    public void shoulCreateInternalFields() {
+    public void shouldCreateInternalFields() {
         config = Configuration.create().with(Field.createInternal("a"), "a1").build();
         assertThat(config.getString("internal.a")).isEqualTo("a1");
     }
@@ -68,7 +68,7 @@ public class ConfigurationTest {
 
         // Use a regex that captures an integer using a regex group ...
         AtomicInteger counter = new AtomicInteger();
-        config.forEachMatchingFieldNameWithInteger("column\\.truncate\\.to\\.(\\d+)\\.chars",(value,n)->{
+        config.forEachMatchingFieldNameWithInteger("column\\.truncate\\.to\\.(\\d+)\\.chars", (value, n) -> {
             counter.incrementAndGet();
             assertThat(value).isEqualTo(Integer.toString(n) + "-chars");
         });
@@ -76,7 +76,7 @@ public class ConfigurationTest {
 
         // Use a regex that captures an integer using a regex group ...
         counter.set(0);
-        config.forEachMatchingFieldNameWithInteger("column.mask.with.(\\d+).chars",(value,n)->{
+        config.forEachMatchingFieldNameWithInteger("column.mask.with.(\\d+).chars", (value, n) -> {
             counter.incrementAndGet();
             assertThat(value).isEqualTo(Integer.toString(n) + "-mask");
         });
@@ -84,7 +84,7 @@ public class ConfigurationTest {
 
         // Use a regex that matches the name but also uses a regex group ...
         counter.set(0);
-        config.forEachMatchingFieldName("column.mask.with.(\\d+).chars",(name,value)->{
+        config.forEachMatchingFieldName("column.mask.with.(\\d+).chars", (name, value) -> {
             counter.incrementAndGet();
             assertThat(name).startsWith("column.mask.with.");
             assertThat(name).endsWith(".chars");
@@ -94,7 +94,7 @@ public class ConfigurationTest {
 
         // Use a regex that matches all of our fields ...
         counter.set(0);
-        config.forEachMatchingFieldName("column.*",(name,value)->{
+        config.forEachMatchingFieldName("column.*", (name, value) -> {
             counter.incrementAndGet();
             assertThat(name).startsWith("column.");
             assertThat(name).endsWith(".chars");
@@ -105,13 +105,13 @@ public class ConfigurationTest {
 
     @Test
     public void shouldMaskPasswords() {
-        Pattern p = Pattern.compile(".*password$",Pattern.CASE_INSENSITIVE);
+        Pattern p = Pattern.compile(".*password$", Pattern.CASE_INSENSITIVE);
         assertThat(p.matcher("password").matches()).isTrue();
         assertThat(p.matcher("otherpassword").matches()).isTrue();
 
         config = Configuration.create()
                 .with("column.password", "warning")
-                .with("column.Password.this.is.not","value")
+                .with("column.Password.this.is.not", "value")
                 .with("column.truncate.to.20.chars", "20-chars")
                 .with("column.mask.with.20.chars", "20-mask")
                 .with("column.mask.with.0.chars", "0-mask")
@@ -130,7 +130,7 @@ public class ConfigurationTest {
      */
     @Test
     @FixFor("DBZ-469")
-    public void defaultDddlFilterShouldFilterOutRdsHeartbeatInsert() {
+    public void defaultDdlFilterShouldFilterOutRdsHeartbeatInsert() {
         String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
         Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
         assertThat(ddlFilter.test("INSERT INTO mysql.rds_heartbeat2(id, value) values (1,1510678117058) ON DUPLICATE KEY UPDATE value = 1510678117058")).isTrue();
@@ -138,7 +138,7 @@ public class ConfigurationTest {
 
     @Test
     @FixFor("DBZ-661")
-    public void defaultDddlFilterShouldFilterOutFlushRelayLogs() {
+    public void defaultDdlFilterShouldFilterOutFlushRelayLogs() {
         String defaultDdlFilter = Configuration.create().build().getString(DatabaseHistory.DDL_FILTER);
         Predicate<String> ddlFilter = Predicates.includes(defaultDdlFilter);
         assertThat(ddlFilter.test("FLUSH RELAY LOGS")).isTrue();

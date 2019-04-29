@@ -10,15 +10,21 @@ import static org.fest.assertions.Assertions.assertThat;
 import java.math.BigDecimal;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.util.List;
 
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestRule;
 
 import io.debezium.config.Configuration;
+import io.debezium.connector.mysql.junit.SkipForLegacyParser;
+import io.debezium.connector.mysql.junit.SkipTestForLegacyParser;
 import io.debezium.data.Envelope;
 import io.debezium.doc.FixFor;
 import io.debezium.embedded.AbstractConnectorTest;
@@ -27,6 +33,7 @@ import io.debezium.util.Testing;
 /**
  * @author Omar Al-Safi
  */
+@SkipForLegacyParser
 public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
 
     private static final Path DB_HISTORY_PATH = Testing.Files.createTestingPath("file-db-history-json.txt")
@@ -36,6 +43,9 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
 
     private final UniqueDatabase DATABASE = new UniqueDatabase("unsignednumericit", "unsigned_integer_test")
             .withDbHistoryPath(DB_HISTORY_PATH);
+
+    @Rule
+    public final TestRule skip = new SkipTestForLegacyParser();
 
     @Before
     public void beforeEach() {
@@ -70,7 +80,7 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
         // ---------------------------------------------------------------------------------------------------------------
         Testing.Debug.enable();
         int numCreateDatabase = 1;
-        int numCreateTables = 5;
+        int numCreateTables = 7;
         int numDataRecords = numCreateTables * 3; //Total data records
         SourceRecords records = consumeRecordsByTopic(numCreateDatabase + numCreateTables + numDataRecords);
         stopConnector();
@@ -113,6 +123,7 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
                 assertBigintUnsignedPrecise(value);
             }
         });
+        assertSerialPrecise(records.recordsForTopic(DATABASE.topicForTable("dbz_1185_serial")));
     }
 
     @Test
@@ -131,7 +142,7 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
         // ---------------------------------------------------------------------------------------------------------------
         Testing.Debug.enable();
         int numCreateDatabase = 1;
-        int numCreateTables = 5;
+        int numCreateTables = 7;
         int numDataRecords = numCreateTables * 3; //Total data records
         SourceRecords records = consumeRecordsByTopic(numCreateDatabase + numCreateTables + numDataRecords);
         stopConnector();
@@ -148,6 +159,8 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
                 assertBigintUnsignedLong(value);
             }
         });
+        assertSerial(records.recordsForTopic(DATABASE.topicForTable("dbz_1185_serial")));
+        assertSerialDefaultValue(records.recordsForTopic(DATABASE.topicForTable("dbz_1185_serial_default_value")));
     }
 
     @Test
@@ -162,7 +175,7 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
         // Consume all of the events due to startup and initialization of the database
         // ---------------------------------------------------------------------------------------------------------------
         //Testing.Debug.enable();
-        int numTables = 5;
+        int numTables = 7;
         int numDataRecords = numTables * 3;
         int numDdlRecords =
                 numTables * 2 + 3; // for each table (1 drop + 1 create) + for each db (1 create + 1 drop + 1 use)
@@ -208,6 +221,8 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
                 assertBigintUnsignedLong(value);
             }
         });
+        assertSerial(records.recordsForTopic(DATABASE.topicForTable("dbz_1185_serial")));
+        assertSerialDefaultValue(records.recordsForTopic(DATABASE.topicForTable("dbz_1185_serial_default_value")));
     }
 
     private void assertTinyintUnsigned(Struct value) {
@@ -227,19 +242,19 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
         //Validate candidates values
         switch (i) {
         case 1:
-            assertThat(after.getInt16("c1")).isEqualTo((short)255);
-            assertThat(after.getInt16("c2")).isEqualTo((short)(255));
-            assertThat(after.getInt16("c3")).isEqualTo((short)127);
+            assertThat(after.getInt16("c1")).isEqualTo((short) 255);
+            assertThat(after.getInt16("c2")).isEqualTo((short) (255));
+            assertThat(after.getInt16("c3")).isEqualTo((short) 127);
             break;
         case 2:
-            assertThat(after.getInt16("c1")).isEqualTo((short)155);
-            assertThat(after.getInt16("c2")).isEqualTo((short)155);
-            assertThat(after.getInt16("c3")).isEqualTo((short)-100);
+            assertThat(after.getInt16("c1")).isEqualTo((short) 155);
+            assertThat(after.getInt16("c2")).isEqualTo((short) 155);
+            assertThat(after.getInt16("c3")).isEqualTo((short) - 100);
             break;
         case 3:
-            assertThat(after.getInt16("c1")).isEqualTo((short)0);
-            assertThat(after.getInt16("c2")).isEqualTo((short)0);
-            assertThat(after.getInt16("c3")).isEqualTo((short)-128);
+            assertThat(after.getInt16("c1")).isEqualTo((short) 0);
+            assertThat(after.getInt16("c2")).isEqualTo((short) 0);
+            assertThat(after.getInt16("c3")).isEqualTo((short) - 128);
         }
     }
 
@@ -261,17 +276,17 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
         case 1:
             assertThat(after.getInt32("c1")).isEqualTo(65535);
             assertThat(after.getInt32("c2")).isEqualTo(65535);
-            assertThat(after.getInt16("c3")).isEqualTo((short)32767);
+            assertThat(after.getInt16("c3")).isEqualTo((short) 32767);
             break;
         case 2:
             assertThat(after.getInt32("c1")).isEqualTo(45535);
             assertThat(after.getInt32("c2")).isEqualTo(45535);
-            assertThat(after.getInt16("c3")).isEqualTo((short)-12767);
+            assertThat(after.getInt16("c3")).isEqualTo((short) - 12767);
             break;
         case 3:
             assertThat(after.getInt32("c1")).isEqualTo(0);
             assertThat(after.getInt32("c2")).isEqualTo(0);
-            assertThat(after.getInt16("c3")).isEqualTo((short)-32768);
+            assertThat(after.getInt16("c3")).isEqualTo((short) - 32768);
         }
     }
 
@@ -417,4 +432,39 @@ public class MySqlUnsignedIntegerIT extends AbstractConnectorTest {
         }
     }
 
+    private void assertSerial(List<SourceRecord> records) {
+        final long[] expected = new long[] {10, 11, -1};
+        assertThat(records).hasSize(3);
+        for (int i = 0; i < 3; i++) {
+            final Struct after = ((Struct) records.get(i).value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.schema().field("id").schema()).isEqualTo(Schema.INT64_SCHEMA);
+            final Long id = after.getInt64("id");
+            assertThat(id).isNotNull();
+            assertThat(id).isEqualTo(expected[i]);
+        }
+    }
+
+    private void assertSerialPrecise(List<SourceRecord> records) {
+        final BigDecimal[] expected = new BigDecimal[] {new BigDecimal(10), new BigDecimal(11), new BigDecimal("18446744073709551615")};
+        assertThat(records).hasSize(3);
+        for (int i = 0; i < 3; i++) {
+            final Struct after = ((Struct) records.get(i).value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.schema().field("id").schema()).isEqualTo(Decimal.builder(0).schema());
+            final BigDecimal id = (BigDecimal) after.get("id");
+            assertThat(id).isNotNull();
+            assertThat(id).isEqualTo(expected[i]);
+        }
+    }
+
+    private void assertSerialDefaultValue(List<SourceRecord> records) {
+        final int[] expected = new int[] {10, 11, 1000};
+        assertThat(records).hasSize(3);
+        for (int i = 0; i < 3; i++) {
+            final Struct after = ((Struct) records.get(i).value()).getStruct(Envelope.FieldName.AFTER);
+            assertThat(after.schema().field("id").schema()).isEqualTo(Schema.INT32_SCHEMA);
+            final Integer id = after.getInt32("id");
+            assertThat(id).isNotNull();
+            assertThat(id).isEqualTo(expected[i]);
+        }
+    }
 }

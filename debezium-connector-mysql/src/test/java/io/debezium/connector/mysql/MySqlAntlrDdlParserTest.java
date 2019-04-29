@@ -10,6 +10,7 @@ import static org.fest.assertions.Assertions.assertThat;
 
 import java.sql.Types;
 import java.util.List;
+import java.util.stream.Stream;
 
 import org.junit.Test;
 
@@ -47,6 +48,227 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(tables.size()).isEqualTo(0);
     }
 
+    @Test
+    @FixFor("DBZ-1220")
+    public void shouldParseFloatVariants() {
+        final String ddl =
+                "CREATE TABLE mytable (id SERIAL, f1 FLOAT, f2 FLOAT(4), f3 FLOAT(7,4));";
+        parser.parse(ddl, tables);
+        assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+
+        final Table table = tables.forTable(null, null, "mytable");
+        assertThat(table.columns().size()).isEqualTo(4);
+
+        final Column f1 = table.columnWithName("f1");
+        assertThat(f1.typeName()).isEqualTo("FLOAT");
+        assertThat(f1.length()).isEqualTo(-1);
+        assertThat(f1.scale().isPresent()).isFalse();
+
+        final Column f2 = table.columnWithName("f2");
+        assertThat(f2.typeName()).isEqualTo("FLOAT");
+        assertThat(f2.length()).isEqualTo(4);
+        assertThat(f2.scale().isPresent()).isFalse();
+
+        final Column f3 = table.columnWithName("f3");
+        assertThat(f3.typeName()).isEqualTo("FLOAT");
+        assertThat(f3.length()).isEqualTo(7);
+        assertThat(f3.scale().get()).isEqualTo(4);
+    }
+
+    @Test
+    @FixFor("DBZ-1185")
+    public void shouldProcessSerialDatatype() {
+        final String ddl =
+                "CREATE TABLE foo1 (id SERIAL, val INT);" +
+                "CREATE TABLE foo2 (id SERIAL PRIMARY KEY, val INT);" +
+                "CREATE TABLE foo3 (id SERIAL, val INT, PRIMARY KEY(id));" +
+
+                "CREATE TABLE foo4 (id SERIAL, val INT PRIMARY KEY);" +
+                "CREATE TABLE foo5 (id SERIAL, val INT, PRIMARY KEY(val));" +
+
+                "CREATE TABLE foo6 (id SERIAL NULL, val INT);" +
+
+                "CREATE TABLE foo7 (id SERIAL NOT NULL, val INT);" +
+
+                "CREATE TABLE serial (serial INT);";
+        parser.parse(ddl, tables);
+        assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+
+        Stream.of("foo1", "foo2", "foo3"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    final Column id = table.columnWithName("id");
+                    assertThat(id.name()).isEqualTo("id");
+                    assertThat(id.typeName()).isEqualTo("BIGINT UNSIGNED");
+                    assertThat(id.length()).isEqualTo(-1);
+                    assertThat(id.isRequired()).isTrue();
+                    assertThat(id.isAutoIncremented()).isTrue();
+                    assertThat(id.isGenerated()).isTrue();
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("id");
+                });
+
+        Stream.of("foo4", "foo5"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("val");
+                });
+
+        Stream.of("foo6"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    final Column id = table.columnWithName("id");
+                    assertThat(id.name()).isEqualTo("id");
+                    assertThat(id.typeName()).isEqualTo("BIGINT UNSIGNED");
+                    assertThat(id.length()).isEqualTo(-1);
+                    assertThat(id.isOptional()).isTrue();
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("id");
+                });
+
+        Stream.of("foo7"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    final Column id = table.columnWithName("id");
+                    assertThat(id.name()).isEqualTo("id");
+                    assertThat(id.typeName()).isEqualTo("BIGINT UNSIGNED");
+                    assertThat(id.length()).isEqualTo(-1);
+                    assertThat(id.isRequired()).isTrue();
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("id");
+                });
+    }
+
+    @Test
+    @FixFor("DBZ-1185")
+    public void shouldProcessSerialDefaultValue() {
+        final String ddl =
+                "CREATE TABLE foo1 (id SMALLINT SERIAL DEFAULT VALUE, val INT);" +
+                "CREATE TABLE foo2 (id SMALLINT SERIAL DEFAULT VALUE PRIMARY KEY, val INT);" +
+                "CREATE TABLE foo3 (id SMALLINT SERIAL DEFAULT VALUE, val INT, PRIMARY KEY(id));" +
+
+                "CREATE TABLE foo4 (id SMALLINT SERIAL DEFAULT VALUE, val INT PRIMARY KEY);" +
+                "CREATE TABLE foo5 (id SMALLINT SERIAL DEFAULT VALUE, val INT, PRIMARY KEY(val));" +
+
+                "CREATE TABLE foo6 (id SMALLINT(3) NULL SERIAL DEFAULT VALUE, val INT);" +
+
+                "CREATE TABLE foo7 (id SMALLINT(5) UNSIGNED SERIAL DEFAULT VALUE NOT NULL, val INT)";
+        parser.parse(ddl, tables);
+        assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+
+        Stream.of("foo1", "foo2", "foo3"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    final Column id = table.columnWithName("id");
+                    assertThat(id.name()).isEqualTo("id");
+                    assertThat(id.typeName()).isEqualTo("SMALLINT");
+                    assertThat(id.length()).isEqualTo(-1);
+                    assertThat(id.isRequired()).isTrue();
+                    assertThat(id.isAutoIncremented()).isTrue();
+                    assertThat(id.isGenerated()).isTrue();
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("id");
+                });
+
+        Stream.of("foo4", "foo5"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("val");
+                });
+
+        Stream.of("foo6"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    final Column id = table.columnWithName("id");
+                    assertThat(id.name()).isEqualTo("id");
+                    assertThat(id.typeName()).isEqualTo("SMALLINT");
+                    assertThat(id.length()).isEqualTo(3);
+                    assertThat(id.isOptional()).isTrue();
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("id");
+                });
+
+        Stream.of("foo7"
+                ).forEach(tableName -> {
+                    final Table table = tables.forTable(null, null, tableName);
+                    assertThat(table.columns().size()).isEqualTo(2);
+                    final Column id = table.columnWithName("id");
+                    assertThat(id.name()).isEqualTo("id");
+                    assertThat(id.typeName()).isEqualTo("SMALLINT UNSIGNED");
+                    assertThat(id.length()).isEqualTo(5);
+                    assertThat(id.isRequired()).isTrue();
+                    assertThat(table.primaryKeyColumnNames()).hasSize(1).containsOnly("id");
+                });
+    }
+
+    @Test
+    @FixFor("DBZ-1123")
+    public void shouldParseGeneratedColumn() {
+        String ddl =
+                "CREATE TABLE t1 (id binary(16) NOT NULL, val char(32) GENERATED ALWAYS AS (hex(id)) STORED, PRIMARY KEY (id));"
+              + "CREATE TABLE t2 (id binary(16) NOT NULL, val char(32) AS (hex(id)) STORED, PRIMARY KEY (id));"
+              + "CREATE TABLE t3 (id binary(16) NOT NULL, val char(32) GENERATED ALWAYS AS (hex(id)) VIRTUAL, PRIMARY KEY (id))";
+        parser.parse(ddl, tables);
+        assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+        assertThat(tables.size()).isEqualTo(3);
+    }
+
+    @Test
+    @FixFor("DBZ-1186")
+    public void shouldParseAlterTableMultiTableOptions() {
+        String ddl =
+                "CREATE TABLE t1 (id int, PRIMARY KEY (id)) STATS_PERSISTENT=1, STATS_AUTO_RECALC=1, STATS_SAMPLE_PAGES=25;"
+              + "ALTER TABLE t1 STATS_AUTO_RECALC=DEFAULT STATS_SAMPLE_PAGES=50;"
+              + "ALTER TABLE t1 STATS_AUTO_RECALC=DEFAULT, STATS_SAMPLE_PAGES=50";
+        parser.parse(ddl, tables);
+        assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+        assertThat(tables.size()).isEqualTo(1);
+    }
+
+    @Test
+    @FixFor("DBZ-1150")
+    public void shouldParseCheckTableKeywords() {
+        String ddl =
+                "CREATE TABLE my_table (\n" +
+                "  user_id varchar(64) NOT NULL,\n" +
+                "  upgrade varchar(256),\n" +
+                "  quick varchar(256),\n" +
+                "  fast varchar(256),\n" +
+                "  medium varchar(256),\n" +
+                "  extended varchar(256),\n" +
+                "  changed varchar(256),\n" +
+                "  UNIQUE KEY call_states_userid (user_id)\n" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8";
+        parser.parse(ddl, tables);
+        assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+        assertThat(tables.size()).isEqualTo(1);
+        final Table table = tables.forTable(null, null, "my_table");
+        assertThat(table.columnWithName("upgrade")).isNotNull();
+        assertThat(table.columnWithName("quick")).isNotNull();
+        assertThat(table.columnWithName("fast")).isNotNull();
+        assertThat(table.columnWithName("medium")).isNotNull();
+        assertThat(table.columnWithName("extended")).isNotNull();
+        assertThat(table.columnWithName("changed")).isNotNull();
+    }
+
+    @Test
+    @FixFor("DBZ-1233")
+    public void shouldParseCheckTableSomeOtherKeyword() {
+        String[] otherKeywords = new String[] { "cache", "close", "des_key_file", "end", "export", "flush", "found",
+                "general", "handler", "help", "hosts", "install", "mode", "next", "open", "relay", "reset", "slow",
+                "soname", "traditional", "triggers", "uninstall", "until", "use_frm", "user_resources" };
+        for (String keyword : otherKeywords) {
+            String ddl = "create table t_" + keyword + "( " + keyword + " varchar(256))";
+            parser.parse(ddl, tables);
+            assertThat(((MySqlAntlrDdlParser) parser).getParsingExceptionsFromWalker().size()).isEqualTo(0);
+            final Table table = tables.forTable(null, null, "t_" + keyword);
+            assertThat(table).isNotNull();
+            assertThat(table.columnWithName(keyword)).isNotNull();
+        }
+    }
+
     @Override
     public void shouldParseAlterStatementsWithoutCreate() {
         // ignore this test - antlr equivalent for it is shouldGetExceptionOnParseAlterStatementsWithoutCreate test
@@ -64,7 +286,7 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(listener.total()).isEqualTo(1);
         Table t = tables.forTable(new TableId(null, null, "t1"));
         assertThat(t).isNotNull();
-        assertThat(t.columnNames()).containsExactly("c1", "c2", "c3", "c4");
+        assertThat(t.retrieveColumnNames()).containsExactly("c1", "c2", "c3", "c4");
         assertThat(t.primaryKeyColumnNames()).containsExactly("c1");
         assertColumn(t, "c1", "INT", Types.INTEGER, -1, -1, false, true, true);
         assertColumn(t, "c2", "DATETIME", Types.TIMESTAMP, -1, -1, true, false, false);
@@ -165,7 +387,7 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(tables.size()).isEqualTo(2);
         Table foo = tables.forTable(new TableId(null, null, "fooView"));
         assertThat(foo).isNotNull();
-        assertThat(foo.columnNames()).containsExactly("c1", "c2");
+        assertThat(foo.retrieveColumnNames()).containsExactly("c1", "c2");
         assertThat(foo.primaryKeyColumnNames()).isEmpty();
         assertColumn(foo, "c1", "INTEGER", Types.INTEGER, -1, -1, false, true, true);
         assertColumn(foo, "c2", "VARCHAR", Types.VARCHAR, 22, -1, true, false, false);
@@ -189,6 +411,21 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
     }
 
     @Test
+    @FixFor("DBZ-1059")
+    public void shouldParseAlterTableRename() {
+        final String ddl = "USE db;"
+                  + "CREATE TABLE db.t1 (ID INTEGER PRIMARY KEY);"
+                  + "ALTER TABLE `t1` RENAME TO `t2`;"
+                  + "ALTER TABLE `db`.`t2` RENAME TO `db`.`t3`;";
+        parser = new MysqlDdlParserWithSimpleTestListener(listener, true);
+        parser.parse(ddl, tables);
+        assertThat(tables.size()).isEqualTo(1);
+        final Table table = tables.forTable(new TableId(null, "db", "t3"));
+        assertThat(table).isNotNull();
+        assertThat(table.columns()).hasSize(1);
+    }
+
+    @Test
     public void shouldParseCreateViewStatementColumnAlias() {
         String ddl = "CREATE TABLE foo ( " + System.lineSeparator()
                 + " c1 INTEGER NOT NULL AUTO_INCREMENT, " + System.lineSeparator()
@@ -202,7 +439,7 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(tables.size()).isEqualTo(2);
         Table foo = tables.forTable(new TableId(null, null, "fooView"));
         assertThat(foo).isNotNull();
-        assertThat(foo.columnNames()).containsExactly("w1");
+        assertThat(foo.retrieveColumnNames()).containsExactly("w1");
         assertThat(foo.primaryKeyColumnNames()).isEmpty();
         assertColumn(foo, "w1", "VARCHAR", Types.VARCHAR, 22, -1, true, false, false);
     }
@@ -221,7 +458,7 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(tables.size()).isEqualTo(2);
         Table foo = tables.forTable(new TableId(null, null, "fooView"));
         assertThat(foo).isNotNull();
-        assertThat(foo.columnNames()).containsExactly("w1");
+        assertThat(foo.retrieveColumnNames()).containsExactly("w1");
         assertThat(foo.primaryKeyColumnNames()).isEmpty();
         assertColumn(foo, "w1", "INTEGER", Types.INTEGER, -1, -1, false, true, true);
     }
@@ -242,7 +479,7 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(listener.total()).isEqualTo(3);
         Table foo = tables.forTable(new TableId(null, null, "fooView"));
         assertThat(foo).isNotNull();
-        assertThat(foo.columnNames()).containsExactly("c2");
+        assertThat(foo.retrieveColumnNames()).containsExactly("c2");
         assertThat(foo.primaryKeyColumnNames()).isEmpty();
         assertColumn(foo, "c2", "VARCHAR", Types.VARCHAR, 22, -1, true, false, false);
     }
@@ -255,7 +492,7 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
                 + "ALTER TABLE ignored ADD COLUMN(x tinyint)" + System.lineSeparator()
                 + "ALTER TABLE ok ADD COLUMN(y tinyint)";
         parser.parse(ddl, tables);
-        assertThat(((MysqlDdlParserWithSimpleTestListener)parser).getParsingExceptionsFromWalker()).isEmpty();
+        assertThat(((MysqlDdlParserWithSimpleTestListener) parser).getParsingExceptionsFromWalker()).isEmpty();
         assertThat(tables.size()).isEqualTo(1);
 
         final Table t1 = tables.forTable(null, null, "ok");
@@ -299,6 +536,101 @@ public class MySqlAntlrDdlParserTest extends MySqlDdlParserTest {
         assertThat(tables.forTable(null, null, "t1").columns()).hasSize(2);
         assertThat(tables.forTable(null, null, "t2").columns()).hasSize(2);
         assertThat(tables.forTable(null, null, "t3").columns()).hasSize(2);
+    }
+
+    @Test
+    @FixFor("DBZ-1028")
+    public void shouldParseCommentWithEngineName() {
+        final String ddl =
+                "CREATE TABLE t1 ("
+                + "`id` int(11) NOT NULL AUTO_INCREMENT, "
+                + "`field_1` int(11) NOT NULL,  "
+                + "`field_2` int(11) NOT NULL,  "
+                + "`field_3` int(11) NOT NULL,  "
+                + "`field_4` int(11) NOT NULL,  "
+                + "`field_5` tinytext COLLATE utf8_unicode_ci NOT NULL, "
+                + "`field_6` tinytext COLLATE utf8_unicode_ci NOT NULL, "
+                + "`field_7` tinytext COLLATE utf8_unicode_ci NOT NULL COMMENT 'CSV',"
+                + "primary key(id));";
+        parser.parse(ddl, tables);
+        assertThat(tables.size()).isEqualTo(1);
+
+        Column columnWithComment = tables.forTable(null, null, "t1").columnWithName("field_7");
+        assertThat(columnWithComment.typeName()).isEqualToIgnoringCase("tinytext");
+    }
+
+    @Test
+    @FixFor("DBZ-780")
+    public void shouldRenameColumnWithoutDefinition() {
+        parser = new MysqlDdlParserWithSimpleTestListener(listener, TableFilter.fromPredicate(x -> !x.table().contains("ignored")));
+
+        final String ddl = "CREATE TABLE foo (id int primary key, old INT);" + System.lineSeparator()
+                + "ALTER TABLE foo RENAME COLUMN old to new ";
+        parser.parse(ddl, tables);
+        assertThat(((MysqlDdlParserWithSimpleTestListener) parser).getParsingExceptionsFromWalker()).isEmpty();
+        assertThat(tables.size()).isEqualTo(1);
+
+        final Table t1 = tables.forTable(null, null, "foo");
+        assertThat(t1.columns()).hasSize(2);
+
+        final Column c1 = t1.columns().get(0);
+        final Column c2 = t1.columns().get(1);
+        assertThat(c1.name()).isEqualTo("id");
+        assertThat(c1.typeName()).isEqualTo("INT");
+        assertThat(c2.name()).isEqualTo("new");
+        assertThat(c2.typeName()).isEqualTo("INT");
+    }
+
+    @Test
+    @FixFor("DBZ-959")
+    public void parseAddPartition() {
+        String ddl =
+                "CREATE TABLE flat_view_request_log (" +
+                "  id INT NOT NULL, myvalue INT DEFAULT -10," +
+                "  PRIMARY KEY (`id`)" +
+                ")" +
+                "ENGINE=InnoDB DEFAULT CHARSET=latin1 " +
+                "PARTITION BY RANGE (to_days(`CreationDate`)) " +
+                "(PARTITION p_2018_01_17 VALUES LESS THAN ('2018-01-17') ENGINE = InnoDB, " +
+                "PARTITION p_2018_01_18 VALUES LESS THAN ('2018-01-18') ENGINE = InnoDB, " +
+                "PARTITION p_max VALUES LESS THAN MAXVALUE ENGINE = InnoDB);"
+            + "ALTER TABLE flat_view_request_log ADD PARTITION (PARTITION p201901 VALUES LESS THAN (737425) ENGINE = InnoDB);";
+
+        parser.parse(ddl, tables);
+        assertThat(tables.size()).isEqualTo(1);
+        assertThat(tables.forTable(new TableId(null, null, "flat_view_request_log"))).isNotNull();
+    }
+
+    @Test
+    @FixFor("DBZ-688")
+    public void parseGeomCollection() {
+        String ddl = "CREATE TABLE geomtable (id int(11) PRIMARY KEY, collection GEOMCOLLECTION DEFAULT NULL)";
+
+        parser.parse(ddl, tables);
+        assertThat(tables.size()).isEqualTo(1);
+        assertThat(tables.forTable(new TableId(null, null, "geomtable"))).isNotNull();
+    }
+
+    @Test
+    @FixFor("DBZ-1203")
+    public void parseAlterEnumColumnWithNewCharacterSet() {
+        String ddl =
+                "CREATE TABLE `test_stations_10` (\n" +
+                        "    `id` int(10) unsigned NOT NULL AUTO_INCREMENT,\n" +
+                        "    `name` varchar(500) COLLATE utf8_unicode_ci NOT NULL,\n" +
+                        "    `type` enum('station', 'post_office') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'station',\n" +
+                        "    `created` datetime DEFAULT CURRENT_TIMESTAMP,\n" +
+                        "    `modified` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n" +
+                        "    PRIMARY KEY (`id`)\n" +
+                        ");\n" +
+                        "\n" +
+                        "ALTER TABLE `test_stations_10`\n" +
+                        "    MODIFY COLUMN `type` ENUM('station', 'post_office', 'plane', 'ahihi_dongok', 'now')\n" +
+                        "    CHARACTER SET 'utf8' COLLATE 'utf8_unicode_ci' NOT NULL DEFAULT 'station';\n";
+
+        parser.parse(ddl, tables);
+        assertThat(tables.size()).isEqualTo(1);
+        assertThat(tables.forTable(new TableId(null, null, "test_stations_10"))).isNotNull();
     }
 
     @Override

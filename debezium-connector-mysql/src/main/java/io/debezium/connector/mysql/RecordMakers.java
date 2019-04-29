@@ -8,6 +8,7 @@ package io.debezium.connector.mysql;
 import java.util.BitSet;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -46,6 +47,7 @@ public class RecordMakers {
     private final Schema schemaChangeKeySchema;
     private final Schema schemaChangeValueSchema;
     private final SchemaNameAdjuster schemaNameAdjuster = SchemaNameAdjuster.create(logger);
+    private final Map<String, ?> restartOffset;
 
     /**
      * Create the record makers using the supplied components.
@@ -53,12 +55,21 @@ public class RecordMakers {
      * @param schema the schema information about the MySQL server databases; may not be null
      * @param source the connector's source information; may not be null
      * @param topicSelector the selector for topic names; may not be null
+     * @param emitTombstoneOnDelete whether to emit a tombstone message upon DELETE events or not
+     * @param restartOffset the offset to publish with the {@link SourceInfo#RESTART_PREFIX} prefix
+     *                      as additional information in the offset. If the connector attempts to
+     *                      restart from an offset with information with this prefix it will
+     *                      create an offset from the prefixed information rather than restarting
+     *                      from the base offset.
+     * @see MySqlConnectorTask#getRestartOffset(Map)
      */
-    public RecordMakers(MySqlSchema schema, SourceInfo source, TopicSelector<TableId> topicSelector, boolean emitTombstoneOnDelete) {
+    public RecordMakers(MySqlSchema schema, SourceInfo source, TopicSelector<TableId> topicSelector,
+            boolean emitTombstoneOnDelete, Map<String, ?> restartOffset) {
         this.schema = schema;
         this.source = source;
         this.topicSelector = topicSelector;
         this.emitTombstoneOnDelete = emitTombstoneOnDelete;
+        this.restartOffset = restartOffset;
         this.schemaChangeKeySchema = SchemaBuilder.struct()
                                                   .name(schemaNameAdjuster.adjust("io.debezium.connector.mysql.SchemaChangeKey"))
                                                   .field(Fields.DATABASE_NAME, Schema.STRING_SCHEMA)
@@ -93,7 +104,9 @@ public class RecordMakers {
      */
     public boolean hasTable(TableId tableId) {
         Long tableNumber = tableNumbersByTableId.get(tableId);
-        if ( tableNumber == null ) return false;
+        if ( tableNumber == null ) {
+            return false;
+        }
         Converter converter = convertersByTableNumber.get(tableNumber);
         return converter != null;
     }
@@ -108,7 +121,9 @@ public class RecordMakers {
      */
     public RecordsForTable forTable(long tableNumber, BitSet includedColumns, BlockingConsumer<SourceRecord> consumer) {
         Converter converter = convertersByTableNumber.get(tableNumber);
-        if (converter == null) return null;
+        if (converter == null) {
+            return null;
+        }
         return new RecordsForTable(converter, includedColumns, consumer);
     }
 
@@ -160,6 +175,19 @@ public class RecordMakers {
         });
     }
 
+    private Map<String, ?> getSourceRecordOffset(Map<String, Object> sourceOffset) {
+        if (restartOffset == null) {
+            return sourceOffset;
+        }
+        else {
+            for(Entry<String, ?> restartOffsetEntry : restartOffset.entrySet()){
+                sourceOffset.put(SourceInfo.RESTART_PREFIX + restartOffsetEntry.getKey(), restartOffsetEntry.getValue());
+            }
+
+            return sourceOffset;
+        }
+    }
+
     /**
      * Assign the given table number to the table with the specified {@link TableId table ID}.
      *
@@ -176,7 +204,9 @@ public class RecordMakers {
             return true;
         }
         TableSchema tableSchema = schema.schemaFor(id);
-        if (tableSchema == null) return false;
+        if (tableSchema == null) {
+            return false;
+        }
 
         String topicName = topicSelector.topicNameFor(id);
         Envelope envelope = tableSchema.getEnvelopeSchema();
@@ -194,9 +224,9 @@ public class RecordMakers {
                 if (value != null || key != null) {
                     Schema keySchema = tableSchema.keySchema();
                     Map<String, ?> partition = source.partition();
-                    Map<String, ?> offset = source.offsetForRow(rowNumber, numberOfRows);
+                    Map<String, Object> offset = source.offsetForRow(rowNumber, numberOfRows);
                     Struct origin = source.struct(id);
-                    SourceRecord record = new SourceRecord(partition, offset, topicName, partitionNum,
+                    SourceRecord record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                             keySchema, key, envelope.schema(), envelope.read(value, origin, ts));
                     consumer.accept(record);
                     return 1;
@@ -213,9 +243,9 @@ public class RecordMakers {
                 if (value != null || key != null) {
                     Schema keySchema = tableSchema.keySchema();
                     Map<String, ?> partition = source.partition();
-                    Map<String, ?> offset = source.offsetForRow(rowNumber, numberOfRows);
+                    Map<String, Object> offset = source.offsetForRow(rowNumber, numberOfRows);
                     Struct origin = source.struct(id);
-                    SourceRecord record = new SourceRecord(partition, offset, topicName, partitionNum,
+                    SourceRecord record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                             keySchema, key, envelope.schema(), envelope.create(value, origin, ts));
                     consumer.accept(record);
                     return 1;
@@ -236,32 +266,32 @@ public class RecordMakers {
                     Struct valueBefore = tableSchema.valueFromColumnData(before);
                     Schema keySchema = tableSchema.keySchema();
                     Map<String, ?> partition = source.partition();
-                    Map<String, ?> offset = source.offsetForRow(rowNumber, numberOfRows);
+                    Map<String, Object> offset = source.offsetForRow(rowNumber, numberOfRows);
                     Struct origin = source.struct(id);
                     if (key != null && !Objects.equals(key, oldKey)) {
                         // The key has changed, so we need to deal with both the new key and old key.
                         // Consumers may push the events into a system that won't allow both records to exist at the same time,
                         // so we first want to send the delete event for the old key...
-                        SourceRecord record = new SourceRecord(partition, offset, topicName, partitionNum,
+                        SourceRecord record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                                 keySchema, oldKey, envelope.schema(), envelope.delete(valueBefore, origin, ts));
                         consumer.accept(record);
                         ++count;
 
                         if (emitTombstoneOnDelete) {
                             // Next send a tombstone event for the old key ...
-                            record = new SourceRecord(partition, offset, topicName, partitionNum, keySchema, oldKey, null, null);
+                            record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum, keySchema, oldKey, null, null);
                             consumer.accept(record);
                             ++count;
                         }
 
                         // And finally send the create event ...
-                        record = new SourceRecord(partition, offset, topicName, partitionNum,
+                        record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                                 keySchema, key, envelope.schema(), envelope.create(valueAfter, origin, ts));
                         consumer.accept(record);
                         ++count;
                     } else {
                         // The key has not changed, so a simple update is fine ...
-                        SourceRecord record = new SourceRecord(partition, offset, topicName, partitionNum,
+                        SourceRecord record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                                 keySchema, key, envelope.schema(), envelope.update(valueBefore, valueAfter, origin, ts));
                         consumer.accept(record);
                         ++count;
@@ -280,17 +310,17 @@ public class RecordMakers {
                 if (value != null || key != null) {
                     Schema keySchema = tableSchema.keySchema();
                     Map<String, ?> partition = source.partition();
-                    Map<String, ?> offset = source.offsetForRow(rowNumber, numberOfRows);
+                    Map<String, Object> offset = source.offsetForRow(rowNumber, numberOfRows);
                     Struct origin = source.struct(id);
                     // Send a delete message ...
-                    SourceRecord record = new SourceRecord(partition, offset, topicName, partitionNum,
+                    SourceRecord record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                             keySchema, key, envelope.schema(), envelope.delete(value, origin, ts));
                     consumer.accept(record);
                     ++count;
 
                     // And send a tombstone ...
                     if (emitTombstoneOnDelete) {
-                        record = new SourceRecord(partition, offset, topicName, partitionNum,
+                        record = new SourceRecord(partition, getSourceRecordOffset(offset), topicName, partitionNum,
                                 keySchema, key, null, null);
                         consumer.accept(record);
                         ++count;

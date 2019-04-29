@@ -14,6 +14,7 @@ import org.apache.kafka.common.config.ConfigDef.Width;
 
 import io.debezium.config.CommonConnectorConfig;
 import io.debezium.config.Configuration;
+import io.debezium.config.EnumeratedValue;
 import io.debezium.config.Field;
 import io.debezium.config.Field.ValidationOutput;
 
@@ -21,6 +22,73 @@ import io.debezium.config.Field.ValidationOutput;
  * The configuration properties.
  */
 public class MongoDbConnectorConfig extends CommonConnectorConfig {
+
+    /**
+     * The set of predefined SnapshotMode options or aliases.
+     */
+    public static enum SnapshotMode implements EnumeratedValue {
+
+        /**
+         * Always perform an initial snapshot when starting.
+         */
+        INITIAL("initial", true),
+
+        /**
+         * Never perform a snapshot and only receive new data changes.
+         */
+        NEVER("never", false);
+
+        private final String value;
+        private final boolean includeData;
+
+        private SnapshotMode(String value, boolean includeData) {
+            this.value = value;
+            this.includeData = includeData;
+        }
+
+        @Override
+        public String getValue() {
+            return value;
+        }
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @return the matching option, or null if no match is found
+         */
+        public static SnapshotMode parse(String value) {
+            if (value == null) {
+                return null;
+            }
+            value = value.trim();
+
+            for (SnapshotMode option : SnapshotMode.values()) {
+                if (option.getValue().equalsIgnoreCase(value)) {
+                    return option;
+                }
+            }
+
+            return null;
+        }
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @param defaultValue the default value; may be null
+         * @return the matching option, or null if no match is found and the non-null default is invalid
+         */
+        public static SnapshotMode parse(String value, String defaultValue) {
+            SnapshotMode mode = parse(value);
+
+            if (mode == null && defaultValue != null) {
+                mode = parse(defaultValue);
+            }
+
+            return mode;
+        }
+    }
 
     /**
      * The comma-separated list of hostname and port pairs (in the form 'host' or 'host:port') of the MongoDB servers in the
@@ -215,6 +283,17 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                                      .withImportance(Importance.MEDIUM)
                                                      .withDescription("");
 
+    public static final Field SNAPSHOT_MODE = Field.create("snapshot.mode")
+                                                     .withDisplayName("Snapshot mode")
+                                                     .withEnum(SnapshotMode.class, SnapshotMode.INITIAL)
+                                                     .withWidth(Width.SHORT)
+                                                     .withImportance(Importance.LOW)
+                                                     .withDescription("The criteria for running a snapshot upon startup of the connector. "
+                                                              + "Options include: "
+                                                              + "'initial' (the default) to specify the connector should always perform an initial sync when required; "
+                                                              + "'never' to specify the connector should never perform an initial sync ");
+
+
     protected static final Field TASK_ID = Field.create("mongodb.task.id")
                                                 .withDescription("Internal use only")
                                                 .withValidation(Field::isInteger)
@@ -235,12 +314,19 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                                                      AUTO_DISCOVER_MEMBERS,
                                                      DATABASE_WHITELIST,
                                                      DATABASE_BLACKLIST,
-                                                     CommonConnectorConfig.TOMBSTONES_ON_DELETE);
+                                                     CommonConnectorConfig.TOMBSTONES_ON_DELETE,
+                                                     CommonConnectorConfig.SNAPSHOT_DELAY_MS,
+                                                     SNAPSHOT_MODE);
 
     protected static Field.Set EXPOSED_FIELDS = ALL_FIELDS;
 
+    private final SnapshotMode snapshotMode;
+
     public MongoDbConnectorConfig(Configuration config) {
         super(config, config.getString(LOGICAL_NAME));
+
+        String snapshotModeValue = config.getString(MongoDbConnectorConfig.SNAPSHOT_MODE);
+        this.snapshotMode = SnapshotMode.parse(snapshotModeValue, MongoDbConnectorConfig.SNAPSHOT_MODE.defaultValueAsString());
     }
 
     protected static ConfigDef configDef() {
@@ -249,7 +335,9 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
                     CONNECT_BACKOFF_MAX_DELAY_MS, MAX_FAILED_CONNECTIONS, AUTO_DISCOVER_MEMBERS,
                     SSL_ENABLED, SSL_ALLOW_INVALID_HOSTNAMES);
         Field.group(config, "Events", DATABASE_WHITELIST, DATABASE_BLACKLIST, COLLECTION_WHITELIST, COLLECTION_BLACKLIST, FIELD_BLACKLIST, FIELD_RENAMES, CommonConnectorConfig.TOMBSTONES_ON_DELETE);
-        Field.group(config, "Connector", MAX_COPY_THREADS, CommonConnectorConfig.MAX_QUEUE_SIZE, CommonConnectorConfig.MAX_BATCH_SIZE, CommonConnectorConfig.POLL_INTERVAL_MS);
+        Field.group(config, "Connector", MAX_COPY_THREADS, CommonConnectorConfig.MAX_QUEUE_SIZE,
+                CommonConnectorConfig.MAX_BATCH_SIZE, CommonConnectorConfig.POLL_INTERVAL_MS,
+                CommonConnectorConfig.SNAPSHOT_DELAY_MS, SNAPSHOT_MODE);
         return config;
     }
 
@@ -260,7 +348,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
             return 1;
         }
         int count = 0;
-        if (ReplicaSets.parse(hosts) == null) {
+        if (ReplicaSets.parse(hosts).all().isEmpty()) {
             problems.accept(field, hosts, "Invalid host specification");
             ++count;
         }
@@ -268,22 +356,24 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig {
     }
 
     private static int validateCollectionBlacklist(Configuration config, Field field, ValidationOutput problems) {
-        String whitelist = config.getString(COLLECTION_WHITELIST);
-        String blacklist = config.getString(COLLECTION_BLACKLIST);
+        return validateBlacklistField(config, problems, COLLECTION_WHITELIST, COLLECTION_BLACKLIST);
+    }
+
+    private static int validateDatabaseBlacklist(Configuration config, Field field, ValidationOutput problems) {
+        return validateBlacklistField(config, problems, DATABASE_WHITELIST, DATABASE_BLACKLIST);
+    }
+
+    private static int validateBlacklistField(Configuration config, ValidationOutput problems, Field fieldWhitelist, Field fieldBlacklist) {
+        String whitelist = config.getString(fieldWhitelist);
+        String blacklist = config.getString(fieldBlacklist);
         if (whitelist != null && blacklist != null) {
-            problems.accept(COLLECTION_BLACKLIST, blacklist, "Whitelist is already specified");
+            problems.accept(fieldBlacklist, blacklist, "Whitelist is already specified");
             return 1;
         }
         return 0;
     }
 
-    private static int validateDatabaseBlacklist(Configuration config, Field field, ValidationOutput problems) {
-        String whitelist = config.getString(DATABASE_WHITELIST);
-        String blacklist = config.getString(DATABASE_BLACKLIST);
-        if (whitelist != null && blacklist != null) {
-            problems.accept(DATABASE_BLACKLIST, blacklist, "Whitelist is already specified");
-            return 1;
-        }
-        return 0;
+    public SnapshotMode getSnapshotMode() {
+        return snapshotMode;
     }
 }
